@@ -10,6 +10,7 @@
     PROGRESS: "danci_learning_progress_v2",
     PREFS: "danci_user_prefs_v2",
     TTS_CONFIG: "danci_tts_config_v1",
+    DAILY_SESSION: "danci_daily_session_v1",
   };
 
   // --- SVG Icons ---
@@ -38,7 +39,7 @@
     title: window.FALLBACK_SHEET_TITLE || "《Business Thinking for Designers》错题词汇与搭配记忆本",
     words: [],
     progress: loadJSON(STORAGE_KEYS.PROGRESS, {
-      items: {}, // { [key]: { mastered: bool, review: bool } }
+      items: {}, // { [key]: { mastered, review, wrongCount, correctCount, lastResult } }
       testedCount: 0,
       correctCount: 0,
     }),
@@ -50,12 +51,15 @@
       filter: "all",
     }),
     searchQuery: "",
-    shuffledOrder: null, // null = original order, array of keys = shuffled
+    orderMode: "default", // 'default' | 'shuffle' | 'weighted'
+    shuffledOrder: null, // array of keys when orderMode is 'shuffle' or 'weighted'
     currentIndex: 0,
+    currentKey: null,
+    sessionDate: "",
     newWordKeys: new Set(),
     lastSyncAt: null,
     lastSyncSummary: "",
-    // Per-card transient UI states
+    // Daily remembered UI states (persisted for today, auto-reset next day)
     itemRevealOverrides: {}, // { [key]: boolean }
     itemInputs: {}, // { [key]: string }
     itemCheckResults: {}, // { [key]: { isCorrect, userInput, overridden } }
@@ -101,6 +105,7 @@
     btnRateNormal: document.getElementById("btn-rate-normal"),
     btnRateSlow: document.getElementById("btn-rate-slow"),
     filterSelect: document.getElementById("filter-select"),
+    btnOrderWeighted: document.getElementById("btn-order-weighted"),
     btnOrderShuffle: document.getElementById("btn-order-shuffle"),
     btnOrderDefault: document.getElementById("btn-order-default"),
     searchInput: document.getElementById("search-input"),
@@ -1039,6 +1044,7 @@
         if (isManual) showToast(`已是最新词库（共 ${state.words.length} 词）`);
       }
 
+      restorePositionFromKey();
       renderAll();
     } catch (err) {
       console.error("Sync failed:", err);
@@ -1049,9 +1055,132 @@
     }
   }
 
-  // --- Progress Helpers ---
+  // --- Daily Session Memory (auto-resets every day) & Adaptive Weights ---
+  function getTodayStr() {
+    const d = new Date();
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    return `${y}-${m}-${day}`;
+  }
+
   function getItemProgress(key) {
-    return state.progress.items[key] || { mastered: false, review: false };
+    const raw = state.progress.items[key] || {};
+    return {
+      mastered: Boolean(raw.mastered),
+      review: Boolean(raw.review),
+      wrongCount: Number(raw.wrongCount || 0),
+      correctCount: Number(raw.correctCount || 0),
+      lastResult: raw.lastResult || null,
+    };
+  }
+
+  function getWordWeight(key) {
+    const p = getItemProgress(key);
+    let weight = 10;
+    if (p.wrongCount > 0) {
+      weight *= Math.pow(1.9, Math.min(p.wrongCount, 5));
+    }
+    if (p.lastResult === "wrong" || p.review) {
+      weight *= 1.5;
+    }
+    if (p.correctCount > 0) {
+      weight *= Math.pow(0.62, Math.min(p.correctCount, 6));
+    }
+    if (p.mastered) {
+      weight *= 0.25;
+    }
+    return Math.max(0.4, Math.min(200, weight));
+  }
+
+  function generateWeightedOrder() {
+    // Efraimidis-Spirakis weighted random permutation:
+    // higher weight (more mistakes) => much higher chance to appear early;
+    // lower weight (answered correctly / mastered) => much lower frequency early on.
+    return [...state.words]
+      .map((w) => {
+        const weight = getWordWeight(w.key);
+        const u = Math.max(1e-9, Math.random());
+        return { key: w.key, score: Math.pow(u, 1 / weight) };
+      })
+      .sort((a, b) => b.score - a.score)
+      .map((item) => item.key);
+  }
+
+  function saveDailySession() {
+    const today = getTodayStr();
+    state.sessionDate = today;
+    saveJSON(STORAGE_KEYS.DAILY_SESSION, {
+      date: today,
+      currentIndex: state.currentIndex,
+      currentKey: state.currentKey,
+      orderMode: state.orderMode,
+      shuffledOrder: state.shuffledOrder,
+      itemInputs: state.itemInputs,
+      itemCheckResults: state.itemCheckResults,
+      itemRevealOverrides: state.itemRevealOverrides,
+    });
+  }
+
+  function restorePositionFromKey() {
+    if (!state.currentKey) return;
+    const words = getFilteredWords();
+    const idx = words.findIndex((w) => w.key === state.currentKey);
+    if (idx !== -1) {
+      state.currentIndex = idx;
+    }
+  }
+
+  function loadOrResetDailySession(showResetNotice = false) {
+    const today = getTodayStr();
+    const saved = loadJSON(STORAGE_KEYS.DAILY_SESSION, null);
+
+    if (saved && saved.date === today) {
+      state.sessionDate = today;
+      state.currentIndex = Number.isInteger(saved.currentIndex) ? saved.currentIndex : 0;
+      state.currentKey = saved.currentKey || null;
+      state.orderMode = saved.orderMode || "default";
+      state.shuffledOrder = Array.isArray(saved.shuffledOrder) ? saved.shuffledOrder : null;
+      state.itemInputs = saved.itemInputs && typeof saved.itemInputs === "object" ? saved.itemInputs : {};
+      state.itemCheckResults =
+        saved.itemCheckResults && typeof saved.itemCheckResults === "object" ? saved.itemCheckResults : {};
+      state.itemRevealOverrides =
+        saved.itemRevealOverrides && typeof saved.itemRevealOverrides === "object"
+          ? saved.itemRevealOverrides
+          : {};
+      restorePositionFromKey();
+      return false;
+    }
+
+    // New day (or first visit): reset today's inputs, checks, reveals, and card position
+    const hadPreviousDay = Boolean(saved && saved.date && saved.date !== today);
+    const prevMode = (saved && saved.orderMode) || state.orderMode || "default";
+    state.sessionDate = today;
+    state.currentIndex = 0;
+    state.currentKey = null;
+    state.itemInputs = {};
+    state.itemCheckResults = {};
+    state.itemRevealOverrides = {};
+    state.orderMode = prevMode;
+
+    if (prevMode === "weighted" && state.words.length > 0) {
+      state.shuffledOrder = generateWeightedOrder();
+    } else if (prevMode === "shuffle" && state.words.length > 0) {
+      const keys = state.words.map((w) => w.key);
+      for (let i = keys.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [keys[i], keys[j]] = [keys[j], keys[i]];
+      }
+      state.shuffledOrder = keys;
+    } else {
+      state.shuffledOrder = null;
+    }
+
+    saveDailySession();
+    if (showResetNotice && hadPreviousDay) {
+      showToast("新的一天开始啦，已自动重置今日默写与位置记录");
+    }
+    return hadPreviousDay;
   }
 
   function saveProgress() {
@@ -1061,6 +1190,7 @@
   function toggleMastered(key) {
     const cur = getItemProgress(key);
     state.progress.items[key] = {
+      ...cur,
       mastered: !cur.mastered,
       review: !cur.mastered ? false : cur.review,
     };
@@ -1080,7 +1210,7 @@
   function getFilteredWords() {
     let list = [...state.words];
 
-    if (state.shuffledOrder && state.shuffledOrder.length > 0) {
+    if (state.orderMode !== "default" && state.shuffledOrder && state.shuffledOrder.length > 0) {
       const idxMap = new Map(state.shuffledOrder.map((k, i) => [k, i]));
       list.sort((a, b) => (idxMap.get(a.key) ?? 999999) - (idxMap.get(b.key) ?? 999999));
     }
@@ -1264,6 +1394,16 @@
       `
         : "";
 
+    let freqBadgeHTML = "";
+    if (state.orderMode === "weighted") {
+      const wScore = getWordWeight(w.key);
+      if (prog.wrongCount > 0 && wScore >= 14) {
+        freqBadgeHTML = `<span class="badge-freq-high" title="历史答错 ${prog.wrongCount} 次，抽查出现几率已提高">高频抽查 · 错${prog.wrongCount}次</span>`;
+      } else if (prog.mastered || (prog.correctCount >= 2 && wScore <= 5)) {
+        freqBadgeHTML = `<span class="badge-freq-low" title="已答对 ${prog.correctCount} 次，抽查出现频率已降低">低频 · 对${prog.correctCount}次</span>`;
+      }
+    }
+
     return `
       <article class="vocab-card" data-key="${escapeHTML(w.key)}">
         <div class="vocab-card-header">
@@ -1274,6 +1414,7 @@
               ${ICONS.speaker}
             </button>
             ${isNew ? `<span class="badge-new">新增</span>` : ""}
+            ${freqBadgeHTML}
           </div>
           <div class="vocab-head-right">
             <button type="button" class="btn-mic ${
@@ -1339,6 +1480,9 @@
     if (state.currentIndex < 0) state.currentIndex = 0;
 
     const current = words[state.currentIndex];
+    state.currentKey = current.key;
+    saveDailySession();
+
     els.cardCounter.textContent = `第 ${state.currentIndex + 1} / ${words.length} 题`;
     els.cardProgressFill.style.width = `${Math.round(((state.currentIndex + 1) / words.length) * 100)}%`;
     els.cardModeSlot.innerHTML = buildVocabCardHTML(current, true);
@@ -1370,7 +1514,9 @@
     state.searchQuery = "";
     els.searchInput.value = "";
     state.currentIndex = 0;
+    state.currentKey = null;
     saveJSON(STORAGE_KEYS.PREFS, state.prefs);
+    saveDailySession();
     renderAll();
   }
 
@@ -1409,9 +1555,9 @@
     els.btnRateSlow.classList.toggle("active", state.prefs.rate < 1.0);
 
     // Order
-    const isShuffled = Boolean(state.shuffledOrder);
-    els.btnOrderShuffle.classList.toggle("active", isShuffled);
-    els.btnOrderDefault.classList.toggle("active", !isShuffled);
+    els.btnOrderWeighted.classList.toggle("active", state.orderMode === "weighted");
+    els.btnOrderShuffle.classList.toggle("active", state.orderMode === "shuffle");
+    els.btnOrderDefault.classList.toggle("active", state.orderMode === "default");
   }
 
   function renderAll() {
@@ -1447,6 +1593,7 @@
       toggleMastered(key);
     } else if (action === "toggle-trans") {
       state.itemRevealOverrides[key] = !isTranslationVisible(key);
+      saveDailySession();
       renderCurrentView();
     } else if (action === "override-check") {
       const res = state.itemCheckResults[key];
@@ -1454,8 +1601,15 @@
         res.overridden = true;
         state.progress.correctCount = (state.progress.correctCount || 0) + 1;
         const cur = getItemProgress(key);
-        state.progress.items[key] = { ...cur, review: false };
+        state.progress.items[key] = {
+          ...cur,
+          review: false,
+          wrongCount: Math.max(0, cur.wrongCount - 1),
+          correctCount: cur.correctCount + 1,
+          lastResult: "correct",
+        };
         saveProgress();
+        saveDailySession();
         updateHeaderStats();
         renderCurrentView();
       }
@@ -1473,6 +1627,7 @@
     const card = e.target.closest(".vocab-card");
     if (!card) return;
     state.itemInputs[card.dataset.key] = e.target.value;
+    saveDailySession();
   }
 
   function handleCardSubmit(e) {
@@ -1499,14 +1654,26 @@
     // Auto-reveal translation after checking so user can compare immediately
     state.itemRevealOverrides[key] = true;
 
+    const cur = getItemProgress(key);
     state.progress.testedCount = (state.progress.testedCount || 0) + 1;
     if (isCorrect) {
       state.progress.correctCount = (state.progress.correctCount || 0) + 1;
+      state.progress.items[key] = {
+        ...cur,
+        review: false,
+        correctCount: cur.correctCount + 1,
+        lastResult: "correct",
+      };
     } else {
-      const cur = getItemProgress(key);
-      state.progress.items[key] = { ...cur, review: true };
+      state.progress.items[key] = {
+        ...cur,
+        review: true,
+        wrongCount: cur.wrongCount + 1,
+        lastResult: "wrong",
+      };
     }
     saveProgress();
+    saveDailySession();
     updateHeaderStats();
     renderCurrentView();
   }
@@ -1521,8 +1688,10 @@
     els.btnViewNewWords.addEventListener("click", () => {
       state.prefs.filter = "new";
       state.currentIndex = 0;
+      state.currentKey = null;
       els.updateBanner.hidden = true;
       saveJSON(STORAGE_KEYS.PREFS, state.prefs);
+      saveDailySession();
       renderAll();
     });
 
@@ -1543,6 +1712,7 @@
       state.prefs.globalHideTranslation = !state.prefs.globalHideTranslation;
       state.itemRevealOverrides = {};
       saveJSON(STORAGE_KEYS.PREFS, state.prefs);
+      saveDailySession();
       updateToolbarControls();
       renderCurrentView();
     });
@@ -1579,26 +1749,44 @@
     els.filterSelect.addEventListener("change", (e) => {
       state.prefs.filter = e.target.value;
       state.currentIndex = 0;
+      state.currentKey = null;
       saveJSON(STORAGE_KEYS.PREFS, state.prefs);
+      saveDailySession();
       renderCurrentView();
     });
 
     // Order buttons
+    els.btnOrderWeighted.addEventListener("click", () => {
+      state.orderMode = "weighted";
+      state.shuffledOrder = generateWeightedOrder();
+      state.currentIndex = 0;
+      state.currentKey = null;
+      saveDailySession();
+      updateToolbarControls();
+      renderCurrentView();
+      showToast("已生成智能抽查顺序（答错词高频优先，答对词降频）");
+    });
     els.btnOrderShuffle.addEventListener("click", () => {
       const keys = state.words.map((w) => w.key);
       for (let i = keys.length - 1; i > 0; i--) {
         const j = Math.floor(Math.random() * (i + 1));
         [keys[i], keys[j]] = [keys[j], keys[i]];
       }
+      state.orderMode = "shuffle";
       state.shuffledOrder = keys;
       state.currentIndex = 0;
+      state.currentKey = null;
+      saveDailySession();
       updateToolbarControls();
       renderCurrentView();
       showToast("已随机打乱词汇顺序");
     });
     els.btnOrderDefault.addEventListener("click", () => {
+      state.orderMode = "default";
       state.shuffledOrder = null;
       state.currentIndex = 0;
+      state.currentKey = null;
+      saveDailySession();
       updateToolbarControls();
       renderCurrentView();
       showToast("已恢复表格原序");
@@ -1674,13 +1862,17 @@
 
     // Footer reset progress
     els.btnResetFooter.addEventListener("click", () => {
-      if (!window.confirm("确定要清空所有本地「已掌握 / 错题 / 自测统计」记录吗？单词库不会被删除。")) {
+      if (!window.confirm("确定要清空所有本地「已掌握 / 错题 / 自测统计 / 今日填写」记录吗？单词库不会被删除。")) {
         return;
       }
       state.progress = { items: {}, testedCount: 0, correctCount: 0 };
       state.itemCheckResults = {};
       state.itemInputs = {};
+      state.itemRevealOverrides = {};
+      state.currentIndex = 0;
+      state.currentKey = null;
       saveProgress();
+      saveDailySession();
       renderAll();
       showToast("本地学习与测试记录已清空");
     });
@@ -1778,9 +1970,14 @@
       }
     });
 
-    // Re-check Google Sheet when switching back to tab after > 90s
+    // Check daily reset & re-check Google Sheet when switching back to tab
     document.addEventListener("visibilitychange", () => {
-      if (document.visibilityState === "visible" && Date.now() - lastAutoCheckTs > 90_000) {
+      if (document.visibilityState !== "visible") return;
+      if (state.sessionDate && getTodayStr() !== state.sessionDate) {
+        loadOrResetDailySession(true);
+        renderAll();
+      }
+      if (Date.now() - lastAutoCheckTs > 90_000) {
         syncFromGoogleSheet(false);
       }
     });
@@ -1808,6 +2005,9 @@
         tip: w.tip || "",
       }));
     }
+
+    // Restore today's position & filled inputs (or auto-reset if a new day has started)
+    loadOrResetDailySession(true);
 
     loadVoices();
     if ("speechSynthesis" in window) {
