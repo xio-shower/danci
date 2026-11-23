@@ -9,6 +9,7 @@
     CACHE: "danci_vocab_cache_v1",
     PROGRESS: "danci_learning_progress_v2",
     PREFS: "danci_user_prefs_v2",
+    TTS_CONFIG: "danci_tts_config_v1",
   };
 
   // --- SVG Icons ---
@@ -26,6 +27,13 @@
       sheetId: DEFAULT_SHEET_ID,
       gid: DEFAULT_GID,
       url: `https://docs.google.com/spreadsheets/d/${DEFAULT_SHEET_ID}/edit?gid=${DEFAULT_GID}#gid=${DEFAULT_GID}`,
+    }),
+    ttsConfig: loadJSON(STORAGE_KEYS.TTS_CONFIG, {
+      engine: "online", // 'online' | 'openai' | 'browser'
+      openaiBaseUrl: "https://api.openai.com/v1",
+      openaiApiKey: "",
+      openaiModel: "gpt-4o-mini-tts",
+      openaiVoice: "nova",
     }),
     title: window.FALLBACK_SHEET_TITLE || "《Business Thinking for Designers》错题词汇与搭配记忆本",
     words: [],
@@ -61,10 +69,12 @@
     activeToken: 0,
     activeKey: null,
     activeTriggerEl: null,
+    activeAudio: null,
     watchdogTimer: null,
     resumeKeepAliveTimer: null,
   };
 
+  const openaiAudioCache = new Map();
   let availableVoices = [];
   let activeRecognition = null;
   let toastTimer = null;
@@ -113,6 +123,14 @@
     btnResetFooter: document.getElementById("btn-reset-footer"),
     settingsModal: document.getElementById("settings-modal"),
     settingsForm: document.getElementById("settings-form"),
+    selectTtsEngine: document.getElementById("select-tts-engine"),
+    ttsEngineDesc: document.getElementById("tts-engine-desc"),
+    openaiConfigBox: document.getElementById("openai-config-box"),
+    inputOpenaiBase: document.getElementById("input-openai-base"),
+    inputOpenaiKey: document.getElementById("input-openai-key"),
+    selectOpenaiModel: document.getElementById("select-openai-model"),
+    selectOpenaiVoice: document.getElementById("select-openai-voice"),
+    btnTestVoice: document.getElementById("btn-test-voice"),
     inputSheetUrl: document.getElementById("input-sheet-url"),
     settingsSyncMeta: document.getElementById("settings-sync-meta"),
     btnCloseSettings: document.getElementById("btn-close-settings"),
@@ -327,11 +345,29 @@
     }
   }
 
+  function getReadyTtsLabel() {
+    const eng = (state.ttsConfig && state.ttsConfig.engine) || "online";
+    if (eng === "openai") return `OpenAI AI 真人语音 (${state.ttsConfig.openaiVoice || "nova"})`;
+    if (eng === "browser") return "浏览器内置语音就绪";
+    return "在线自然语音就绪";
+  }
+
   function stopSpeaking(resetBadge = true) {
     ttsSession.activeToken++;
     clearTtsTimers();
     ttsSession.isSpeaking = false;
     ttsSession.activeKey = null;
+    if (ttsSession.activeAudio) {
+      try {
+        ttsSession.activeAudio.onended = null;
+        ttsSession.activeAudio.onerror = null;
+        ttsSession.activeAudio.pause();
+        ttsSession.activeAudio.src = "";
+      } catch {
+        // ignore
+      }
+      ttsSession.activeAudio = null;
+    }
     if (ttsSession.activeTriggerEl) {
       ttsSession.activeTriggerEl.classList.remove("speaking-active");
       ttsSession.activeTriggerEl = null;
@@ -343,7 +379,7 @@
         // ignore
       }
     }
-    if (resetBadge) updateTtsStatus("语音就绪", "ready");
+    if (resetBadge) updateTtsStatus(getReadyTtsLabel(), "ready");
   }
 
   function normalizeSpeechText(raw) {
@@ -360,7 +396,7 @@
       .trim();
   }
 
-  function splitTextIntoChunks(text, maxLen = 115) {
+  function splitTextIntoChunks(text, maxLen = 150) {
     if (!text) return [];
     if (text.length <= maxLen) return [text];
     const parts = text.match(/[^.!?:;]+[.!?:;]+(?=\s|$)|[^.!?:;]+$/g) || [text];
@@ -411,40 +447,67 @@
     return [...pool].sort((a, b) => score(b) - score(a))[0] || null;
   }
 
-  function speakText(rawText, triggerEl = null, label = "正在朗读") {
-    const cleaned = normalizeSpeechText(rawText);
-    if (!cleaned) {
-      showToast("没有可朗读的英文内容");
-      return;
+  function finishTtsSession(token, hadError = false) {
+    if (token !== ttsSession.activeToken) return;
+    clearTtsTimers();
+    ttsSession.isSpeaking = false;
+    ttsSession.activeKey = null;
+    ttsSession.activeAudio = null;
+    if (ttsSession.activeTriggerEl) {
+      ttsSession.activeTriggerEl.classList.remove("speaking-active");
+      ttsSession.activeTriggerEl = null;
     }
+    updateTtsStatus(hadError ? "朗读受阻，请重试" : getReadyTtsLabel(), hadError ? "error" : "ready");
+  }
 
-    const targetLang = state.prefs.accent || "en-US";
-    const targetRate = state.prefs.rate || 1.0;
-    const sessionKey = `${targetLang}|${targetRate}|${cleaned}`;
+  function playAudioUrlQueue(urls, token, rate, onDone, onError) {
+    const playIdx = (idx) => {
+      if (token !== ttsSession.activeToken) return;
+      if (idx >= urls.length) {
+        onDone();
+        return;
+      }
 
-    // Click again to stop
-    if (ttsSession.isSpeaking && ttsSession.activeKey === sessionKey) {
-      stopSpeaking(true);
-      return;
-    }
+      const audio = new Audio();
+      audio.preload = "auto";
+      audio.playbackRate = rate;
+      audio.src = urls[idx];
+      ttsSession.activeAudio = audio;
 
+      let settled = false;
+      const doneOne = () => {
+        if (settled || token !== ttsSession.activeToken) return;
+        settled = true;
+        playIdx(idx + 1);
+      };
+      const failOne = (err) => {
+        if (settled || token !== ttsSession.activeToken) return;
+        settled = true;
+        onError(err);
+      };
+
+      audio.onended = doneOne;
+      audio.onerror = () => failOne(new Error("音频加载失败"));
+
+      const p = audio.play();
+      if (p && typeof p.catch === "function") {
+        p.catch(failOne);
+      }
+    };
+
+    playIdx(0);
+  }
+
+  function speakViaBrowserTTS(cleaned, token, targetLang, targetRate, label) {
     if (!("speechSynthesis" in window) || typeof SpeechSynthesisUtterance === "undefined") {
-      updateTtsStatus("当前浏览器不支持语音合成", "error");
+      finishTtsSession(token, true);
       showToast("当前浏览器不支持语音朗读");
       return;
     }
 
-    stopSpeaking(false);
-    const token = ttsSession.activeToken;
     const chunks = splitTextIntoChunks(cleaned, 115);
     const voice = pickVoiceForAccent(targetLang);
-
-    ttsSession.isSpeaking = true;
-    ttsSession.activeKey = sessionKey;
-    ttsSession.activeTriggerEl = triggerEl;
-    if (triggerEl) triggerEl.classList.add("speaking-active");
-
-    updateTtsStatus(`${label} · ${targetLang}`, "speaking");
+    updateTtsStatus(`${label}（本地语音）· ${targetLang}`, "speaking");
 
     ttsSession.resumeKeepAliveTimer = setInterval(() => {
       if (token !== ttsSession.activeToken || !ttsSession.isSpeaking) {
@@ -458,22 +521,10 @@
       }
     }, 4000);
 
-    const finish = (hadError = false) => {
-      if (token !== ttsSession.activeToken) return;
-      clearTtsTimers();
-      ttsSession.isSpeaking = false;
-      ttsSession.activeKey = null;
-      if (ttsSession.activeTriggerEl) {
-        ttsSession.activeTriggerEl.classList.remove("speaking-active");
-        ttsSession.activeTriggerEl = null;
-      }
-      updateTtsStatus(hadError ? "朗读受阻，请重试" : "语音就绪", hadError ? "error" : "ready");
-    };
-
     const speakChunk = (idx) => {
       if (token !== ttsSession.activeToken) return;
       if (idx >= chunks.length) {
-        finish(false);
+        finishTtsSession(token, false);
         return;
       }
 
@@ -486,7 +537,7 @@
           ttsSession.watchdogTimer = null;
         }
         if (err && idx === chunks.length - 1) {
-          finish(true);
+          finishTtsSession(token, true);
         } else {
           setTimeout(() => speakChunk(idx + 1), 35);
         }
@@ -511,6 +562,150 @@
     };
 
     speakChunk(0);
+  }
+
+  function speakViaOnlineNatural(cleaned, token, targetLang, targetRate, label) {
+    const isShortPhrase =
+      cleaned.length <= 36 && !/[.!?:;,]/.test(cleaned) && cleaned.split(/\s+/).length <= 4;
+
+    const googleUrls = splitTextIntoChunks(cleaned, 160).map(
+      (chunk) =>
+        `https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=${encodeURIComponent(
+          targetLang
+        )}&q=${encodeURIComponent(chunk)}`
+    );
+
+    if (isShortPhrase) {
+      const youdaoType = targetLang === "en-GB" ? 1 : 2;
+      const youdaoUrl = `https://dict.youdao.com/dictvoice?audio=${encodeURIComponent(
+        cleaned
+      )}&type=${youdaoType}`;
+      updateTtsStatus(`${label}（真人词典音）· ${targetLang}`, "speaking");
+      playAudioUrlQueue(
+        [youdaoUrl],
+        token,
+        targetRate,
+        () => finishTtsSession(token, false),
+        () => {
+          if (token !== ttsSession.activeToken) return;
+          updateTtsStatus(`${label}（在线自然音）· ${targetLang}`, "speaking");
+          playAudioUrlQueue(
+            googleUrls,
+            token,
+            targetRate,
+            () => finishTtsSession(token, false),
+            () => speakViaBrowserTTS(cleaned, token, targetLang, targetRate, label)
+          );
+        }
+      );
+    } else {
+      updateTtsStatus(`${label}（在线自然音）· ${targetLang}`, "speaking");
+      playAudioUrlQueue(
+        googleUrls,
+        token,
+        targetRate,
+        () => finishTtsSession(token, false),
+        () => speakViaBrowserTTS(cleaned, token, targetLang, targetRate, label)
+      );
+    }
+  }
+
+  async function speakViaOpenAI(cleaned, token, targetLang, targetRate, label, cfg) {
+    const apiKey = (cfg.openaiApiKey || "").trim();
+    const baseUrl = (cfg.openaiBaseUrl || "https://api.openai.com/v1").trim().replace(/\/+$/, "");
+    const model = cfg.openaiModel || "gpt-4o-mini-tts";
+    const voice = cfg.openaiVoice || "nova";
+
+    if (!apiKey) {
+      showToast("尚未填写 OpenAI API Key，已自动切回在线自然语音");
+      speakViaOnlineNatural(cleaned, token, targetLang, targetRate, label);
+      return;
+    }
+
+    const cacheKey = `${baseUrl}|${model}|${voice}|${cleaned}`;
+    if (openaiAudioCache.has(cacheKey)) {
+      updateTtsStatus(`${label}（AI 真人 · ${voice}）`, "speaking");
+      playAudioUrlQueue(
+        [openaiAudioCache.get(cacheKey)],
+        token,
+        targetRate,
+        () => finishTtsSession(token, false),
+        () => speakViaOnlineNatural(cleaned, token, targetLang, targetRate, label)
+      );
+      return;
+    }
+
+    updateTtsStatus(`AI 语音生成中 (${voice})…`, "speaking");
+    try {
+      const res = await fetch(`${baseUrl}/audio/speech`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model,
+          voice,
+          input: cleaned,
+          response_format: "mp3",
+        }),
+      });
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`);
+      }
+      const blob = await res.blob();
+      if (token !== ttsSession.activeToken) return;
+      const blobUrl = URL.createObjectURL(blob);
+      openaiAudioCache.set(cacheKey, blobUrl);
+
+      updateTtsStatus(`${label}（AI 真人 · ${voice}）`, "speaking");
+      playAudioUrlQueue(
+        [blobUrl],
+        token,
+        targetRate,
+        () => finishTtsSession(token, false),
+        () => speakViaOnlineNatural(cleaned, token, targetLang, targetRate, label)
+      );
+    } catch (err) {
+      if (token !== ttsSession.activeToken) return;
+      console.error("OpenAI TTS failed:", err);
+      showToast(`AI 接口请求失败（${err.message}），已自动回退在线语音`);
+      speakViaOnlineNatural(cleaned, token, targetLang, targetRate, label);
+    }
+  }
+
+  function speakText(rawText, triggerEl = null, label = "正在朗读", overrideTtsCfg = null) {
+    const cleaned = normalizeSpeechText(rawText);
+    if (!cleaned) {
+      showToast("没有可朗读的英文内容");
+      return;
+    }
+
+    const cfg = overrideTtsCfg || state.ttsConfig || { engine: "online" };
+    const targetLang = state.prefs.accent || "en-US";
+    const targetRate = state.prefs.rate || 1.0;
+    const sessionKey = `${cfg.engine}|${cfg.openaiVoice || ""}|${targetLang}|${targetRate}|${cleaned}`;
+
+    // Click again to stop
+    if (ttsSession.isSpeaking && ttsSession.activeKey === sessionKey) {
+      stopSpeaking(true);
+      return;
+    }
+
+    stopSpeaking(false);
+    const token = ttsSession.activeToken;
+    ttsSession.isSpeaking = true;
+    ttsSession.activeKey = sessionKey;
+    ttsSession.activeTriggerEl = triggerEl;
+    if (triggerEl) triggerEl.classList.add("speaking-active");
+
+    if (cfg.engine === "openai") {
+      speakViaOpenAI(cleaned, token, targetLang, targetRate, label, cfg);
+    } else if (cfg.engine === "browser") {
+      speakViaBrowserTTS(cleaned, token, targetLang, targetRate, label);
+    } else {
+      speakViaOnlineNatural(cleaned, token, targetLang, targetRate, label);
+    }
   }
 
   // --- Speech Recognition (Voice Shadowing / 跟读检测) ---
@@ -1491,13 +1686,56 @@
     });
 
     // Settings Modal
-    els.btnOpenSettings.addEventListener("click", () => {
+    const updateTtsEngineFields = () => {
+      const eng = els.selectTtsEngine.value;
+      els.openaiConfigBox.hidden = eng !== "openai";
+      if (eng === "openai") {
+        els.ttsEngineDesc.textContent =
+          "调用 OpenAI TTS 接口生成播音级真人发音（支持官方或兼容中转接口），音频自动缓存。";
+      } else if (eng === "browser") {
+        els.ttsEngineDesc.textContent =
+          "使用浏览器内置语音。强烈建议用 Microsoft Edge 浏览器打开，免费自带微软 Azure AI 神经语音（Aria / Guy / Sonia）。";
+      } else {
+        els.ttsEngineDesc.textContent =
+          "单词使用真人词典音，长句使用在线自然语音；若网络受限则自动回退本地语音。";
+      }
+    };
+
+    const openSettingsModal = () => {
+      els.selectTtsEngine.value = state.ttsConfig.engine || "online";
+      els.inputOpenaiBase.value = state.ttsConfig.openaiBaseUrl || "https://api.openai.com/v1";
+      els.inputOpenaiKey.value = state.ttsConfig.openaiApiKey || "";
+      els.selectOpenaiModel.value = state.ttsConfig.openaiModel || "gpt-4o-mini-tts";
+      els.selectOpenaiVoice.value = state.ttsConfig.openaiVoice || "nova";
+      updateTtsEngineFields();
+
       els.inputSheetUrl.value = state.config.url;
       els.settingsSyncMeta.textContent = state.lastSyncAt
         ? `上次同步：${formatTime(state.lastSyncAt)}（${state.lastSyncSummary || `共 ${state.words.length} 词`}）`
         : "尚未完成同步";
       els.settingsModal.hidden = false;
+    };
+
+    els.btnOpenSettings.addEventListener("click", openSettingsModal);
+    els.ttsStatusBadge.addEventListener("click", openSettingsModal);
+    els.selectTtsEngine.addEventListener("change", updateTtsEngineFields);
+
+    els.btnTestVoice.addEventListener("click", () => {
+      const previewCfg = {
+        engine: els.selectTtsEngine.value,
+        openaiBaseUrl: els.inputOpenaiBase.value.trim() || "https://api.openai.com/v1",
+        openaiApiKey: els.inputOpenaiKey.value.trim(),
+        openaiModel: els.selectOpenaiModel.value,
+        openaiVoice: els.selectOpenaiVoice.value,
+      };
+      speakText(
+        "Governments should adopt international best practices to optimize public healthcare systems.",
+        els.btnTestVoice,
+        "试听例句",
+        previewCfg
+      );
     });
+
     const closeSettings = () => {
       els.settingsModal.hidden = true;
     };
@@ -1515,10 +1753,29 @@
         showToast("请输入有效的 Google 表格链接");
         return;
       }
+
+      const sheetChanged =
+        parsed.sheetId !== state.config.sheetId || parsed.gid !== state.config.gid;
+
+      state.ttsConfig = {
+        engine: els.selectTtsEngine.value,
+        openaiBaseUrl: els.inputOpenaiBase.value.trim() || "https://api.openai.com/v1",
+        openaiApiKey: els.inputOpenaiKey.value.trim(),
+        openaiModel: els.selectOpenaiModel.value,
+        openaiVoice: els.selectOpenaiVoice.value,
+      };
+      saveJSON(STORAGE_KEYS.TTS_CONFIG, state.ttsConfig);
+      updateTtsStatus(getReadyTtsLabel(), "ready");
+
       state.config = { sheetId: parsed.sheetId, gid: parsed.gid, url: rawUrl };
       saveJSON(STORAGE_KEYS.CONFIG, state.config);
       closeSettings();
-      syncFromGoogleSheet(true);
+
+      if (sheetChanged) {
+        syncFromGoogleSheet(true);
+      } else {
+        showToast("语音与同步设置已保存");
+      }
     });
 
     // Re-check Google Sheet when switching back to tab after > 90s
@@ -1557,6 +1814,7 @@
       window.speechSynthesis.onvoiceschanged = loadVoices;
     }
 
+    updateTtsStatus(getReadyTtsLabel(), "ready");
     bindEvents();
     renderAll();
 

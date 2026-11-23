@@ -3,6 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="referrer" content="no-referrer" />
   <title>《Business Thinking for Designers》错题词汇与搭配记忆本</title>
   <meta name="description" content="连接 Google 表格的英语词汇与搭配记忆网页，支持点击词汇朗读跟读、隐藏翻译默写自测、雅思写作/口语迁移与打开自动探测表格更新。" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -182,10 +183,10 @@
       <div class="footer-left">
         <span id="footer-total-text">共收录 0 条核心错题词汇与搭配（自动同步 Google 表格）</span>
         <span>|</span>
-        <span id="tts-status-badge" class="tts-badge" data-state="ready">
+        <button type="button" id="tts-status-badge" class="tts-badge" data-state="ready" style="border:none; cursor:pointer;" title="点击切换 AI 语音引擎">
           <span class="tts-dot" aria-hidden="true"></span>
-          <span id="tts-status-text">语音就绪</span>
-        </span>
+          <span id="tts-status-text">在线自然语音就绪</span>
+        </button>
       </div>
       <button type="button" id="btn-reset-footer" class="btn-reset-link">清空本地掌握与测试记录</button>
     </div>
@@ -193,12 +194,61 @@
 
   <!-- 设置弹窗 -->
   <div id="settings-modal" class="modal-backdrop" hidden role="dialog" aria-modal="true" aria-labelledby="settings-title">
-    <div class="modal-panel">
+    <div class="modal-panel" style="max-height: 90vh; overflow-y: auto;">
       <div class="modal-header">
-        <h2 id="settings-title">词库来源与自动同步设置</h2>
+        <h2 id="settings-title">AI 语音与词库同步设置</h2>
         <button type="button" id="btn-close-settings" class="btn-secondary btn-sm">关闭</button>
       </div>
       <form id="settings-form">
+        <div class="form-section-title">1. AI 真人语音引擎</div>
+        <div class="form-field">
+          <label for="select-tts-engine">发音引擎</label>
+          <select id="select-tts-engine">
+            <option value="online">在线自然语音（免费免配置 · 推荐）</option>
+            <option value="openai">OpenAI AI 真人语音（播音级，需填 API Key）</option>
+            <option value="browser">浏览器内置语音（Edge 免费自带微软神经语音）</option>
+          </select>
+          <p class="form-help" id="tts-engine-desc">单词使用真人词典音，长句使用在线自然神经语音；若断网自动回退本地语音。</p>
+        </div>
+
+        <div id="openai-config-box" class="openai-box" hidden>
+          <div class="form-field">
+            <label for="input-openai-base">API Base URL（兼容 OpenAI 中转接口）</label>
+            <input type="url" id="input-openai-base" placeholder="https://api.openai.com/v1" />
+          </div>
+          <div class="form-field">
+            <label for="input-openai-key">API Key（仅保存在当前浏览器本地）</label>
+            <input type="password" id="input-openai-key" placeholder="sk-..." autocomplete="off" />
+          </div>
+          <div class="form-grid-2">
+            <div class="form-field" style="margin-bottom:0;">
+              <label for="select-openai-model">模型</label>
+              <select id="select-openai-model">
+                <option value="gpt-4o-mini-tts">gpt-4o-mini-tts（最自然）</option>
+                <option value="tts-1">tts-1（快速）</option>
+                <option value="tts-1-hd">tts-1-hd（高清）</option>
+              </select>
+            </div>
+            <div class="form-field" style="margin-bottom:0;">
+              <label for="select-openai-voice">真人音色</label>
+              <select id="select-openai-voice">
+                <option value="nova">Nova（自然清晰女声）</option>
+                <option value="alloy">Alloy（中性均衡）</option>
+                <option value="shimmer">Shimmer（温柔女声）</option>
+                <option value="onyx">Onyx（磁性男声）</option>
+                <option value="echo">Echo（沉稳男声）</option>
+                <option value="fable">Fable（英伦播音腔）</option>
+              </select>
+            </div>
+          </div>
+        </div>
+
+        <div class="voice-test-row">
+          <span class="form-help">已生成的 AI 音频会自动缓存，重复听不重复请求。</span>
+          <button type="button" id="btn-test-voice" class="btn-secondary btn-sm">试听例句</button>
+        </div>
+
+        <div class="form-section-title">2. Google 表格自动同步</div>
         <div class="form-field">
           <label for="input-sheet-url">Google 表格链接</label>
           <input type="url" id="input-sheet-url" required placeholder="https://docs.google.com/spreadsheets/d/..." />
@@ -210,7 +260,7 @@
         </div>
         <div class="modal-footer">
           <button type="button" id="btn-cancel-settings" class="btn-secondary btn-sm">取消</button>
-          <button type="submit" class="btn-primary btn-sm">保存并立即同步</button>
+          <button type="submit" class="btn-primary btn-sm">保存设置</button>
         </div>
       </form>
     </div>

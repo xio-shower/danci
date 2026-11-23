@@ -1252,23 +1252,68 @@ mark.term-mark {
   color: var(--ink-secondary);
 }
 
-.form-field input {
+.form-field input,
+.form-field select {
   padding: 9px 12px;
   border-radius: 10px;
   border: 1px solid var(--border-strong);
+  background: var(--surface);
   font-size: 0.84rem;
   outline: none;
 }
 
-.form-field input:focus {
+.form-field input:focus,
+.form-field select:focus {
   border-color: var(--brand-500);
   box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
+}
+
+.form-section-title {
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: var(--brand-700);
+  margin: 14px 0 10px;
+  padding-top: 12px;
+  border-top: 1px solid var(--surface-subtle);
+}
+
+.form-section-title:first-of-type {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: none;
+}
+
+.form-grid-2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.openai-box {
+  padding: 12px;
+  border-radius: 12px;
+  background: var(--surface-muted);
+  border: 1px solid var(--border);
+  margin-bottom: 12px;
+}
+
+.openai-box[hidden] {
+  display: none;
+}
+
+.voice-test-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 6px;
 }
 
 .form-help {
   margin: 0;
   font-size: 0.75rem;
   color: var(--ink-muted);
+  line-height: 1.5;
 }
 
 .modal-footer {
