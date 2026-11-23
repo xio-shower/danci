@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>单词记忆本 · 自动同步 Google 表格</title>
+  <meta name="description" content="连接 Google 表格的英语单词与搭配记忆网页，支持点击发声跟读、隐藏翻译、手动输入翻译自测及自动探测词库更新。" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Newsreader:ital,opsz,wght@0,6..72,500;0,6..72,600;1,6..72,400&family=Noto+Sans+SC:wght@400;500;600&family=Noto+Serif+SC:wght@600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <header class="site-header">
+      <div class="header-top">
+        <div class="brand-block">
+          <h1 id="notebook-title" class="notebook-title">《Business Thinking for Designers》错题词汇与搭配笔记本</h1>
+          <p class="notebook-subtitle">
+            <span>点击单词即可发声</span>
+            <span>·</span>
+            <span>支持跟读与隐藏翻译自测</span>
+            <span>·</span>
+            <span>打开网页自动探测表格更新</span>
+          </p>
+        </div>
+
+        <div class="header-actions">
+          <div id="sync-status-pill" class="sync-pill" data-state="syncing" title="打开页面会自动检测 Google 表格是否有更新">
+            <span class="sync-dot" aria-hidden="true"></span>
+            <span id="sync-status-text">正在检查表格更新…</span>
+          </div>
+          <button type="button" id="btn-sync-now" class="btn btn-sm" title="立即从 Google 表格拉取最新词库">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
+              <path d="M3 3v5h5"/>
+              <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/>
+              <path d="M16 16h5v5"/>
+            </svg>
+            <span>检查更新</span>
+          </button>
+          <a id="link-source-sheet" class="btn btn-sm" href="https://docs.google.com/spreadsheets/d/1Ho3WWDmm6kod9JoKVz87UOcsje7fBaWclRo2QbGO9-c/edit?gid=0#gid=0" target="_blank" rel="noopener noreferrer" title="打开原 Google 表格">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
+              <polyline points="15 3 21 3 21 9"/>
+              <line x1="10" y1="14" x2="21" y2="3"/>
+            </svg>
+            <span>原表格</span>
+          </a>
+          <button type="button" id="btn-open-settings" class="btn btn-sm btn-icon" title="表格来源与同步设置" aria-label="表格来源与同步设置">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <circle cx="12" cy="12" r="3"/>
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <section id="update-banner" class="update-banner" hidden aria-live="polite">
+      <div id="update-banner-message">检测到单词本有更新。</div>
+      <div class="update-banner-actions">
+        <button type="button" id="btn-view-new-words" class="btn btn-primary btn-sm" hidden>只看新增词</button>
+        <button type="button" id="btn-dismiss-banner" class="btn btn-ghost btn-sm">知道了</button>
+      </div>
+    </section>
+
+    <section class="toolbar" aria-label="学习模式与语音控制">
+      <div class="toolbar-row">
+        <div class="segmented" role="tablist" aria-label="视图模式">
+          <button type="button" id="tab-list" class="segmented-btn active" role="tab" aria-selected="true">
+            列表记忆
+          </button>
+          <button type="button" id="tab-quiz" class="segmented-btn" role="tab" aria-selected="false">
+            卡片自测
+          </button>
+        </div>
+
+        <div class="controls-group">
+          <label class="toggle-control" id="hide-trans-label" title="隐藏中文翻译后，可直接手动输入翻译自测">
+            <input type="checkbox" id="toggle-hide-translation" />
+            <span class="toggle-track" aria-hidden="true"></span>
+            <span>隐藏翻译</span>
+          </label>
+
+          <div class="segmented" aria-label="口音切换">
+            <button type="button" id="btn-accent-us" class="segmented-btn active" title="美式发音">美音 US</button>
+            <button type="button" id="btn-accent-uk" class="segmented-btn" title="英式发音">英音 UK</button>
+          </div>
+
+          <button type="button" id="btn-speed-toggle" class="btn btn-sm" title="切换语速，慢速更适合跟读">
+            语速 1.0x
+          </button>
+        </div>
+      </div>
+
+      <div class="filter-row">
+        <div id="filter-pills" class="filter-pills" role="group" aria-label="词库筛选">
+          <button type="button" class="filter-pill active" data-filter="all">全部 <span class="count" id="count-all">0</span></button>
+          <button type="button" class="filter-pill" data-filter="unmastered">未掌握 <span class="count" id="count-unmastered">0</span></button>
+          <button type="button" class="filter-pill" data-filter="review">需复习 <span class="count" id="count-review">0</span></button>
+          <button type="button" class="filter-pill" data-filter="mastered">已掌握 <span class="count" id="count-mastered">0</span></button>
+          <button type="button" class="filter-pill pill-new" data-filter="new" id="pill-filter-new" hidden>本次新增 <span class="count" id="count-new">0</span></button>
+        </div>
+
+        <div class="controls-group">
+          <div class="search-wrap">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <circle cx="11" cy="11" r="8"/>
+              <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+            </svg>
+            <input type="search" id="search-input" class="search-input" placeholder="搜索单词、翻译或原句…" autocomplete="off" />
+          </div>
+          <button type="button" id="btn-shuffle" class="btn btn-sm" title="打乱当前顺序">随机打乱</button>
+        </div>
+      </div>
+    </section>
+
+    <div class="progress-strip" aria-label="掌握进度">
+      <span id="progress-label">已掌握 0 / 0</span>
+      <div class="progress-bar-track">
+        <div id="progress-bar-fill" class="progress-bar-fill" style="width: 0%"></div>
+      </div>
+      <span id="progress-percent">0%</span>
+    </div>
+
+    <main id="main-content">
+      <div id="list-view" class="word-list"></div>
+      <div id="quiz-view" class="quiz-container" hidden></div>
+    </main>
+  </div>
+
+  <!-- Settings Modal -->
+  <div id="settings-modal" class="modal-backdrop" hidden role="dialog" aria-modal="true" aria-labelledby="settings-title">
+    <div class="modal-panel">
+      <div class="modal-header">
+        <h2 id="settings-title">词库来源与同步设置</h2>
+        <button type="button" id="btn-close-settings" class="btn btn-ghost btn-sm" aria-label="关闭">关闭</button>
+      </div>
+      <form id="settings-form">
+        <div class="form-field">
+          <label for="input-sheet-url">Google 表格链接</label>
+          <input type="url" id="input-sheet-url" required placeholder="https://docs.google.com/spreadsheets/d/..." />
+          <p class="form-help">需将表格共享权限设为「知道链接的任何人可查看」。每次打开网页会自动拉取最新内容并对比新增/修改的词条。</p>
+        </div>
+        <div class="form-field">
+          <label>上次同步信息</label>
+          <p id="settings-sync-meta" class="form-help">尚未同步</p>
+        </div>
+        <div class="modal-footer">
+          <button type="button" id="btn-reset-progress" class="btn btn-sm" style="color: var(--danger); border-color: var(--danger-border);">重置学习记录</button>
+          <div class="controls-group">
+            <button type="button" id="btn-cancel-settings" class="btn btn-sm">取消</button>
+            <button type="submit" class="btn btn-primary btn-sm">保存并立即同步</button>
+          </div>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <script src="fallback-data.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
