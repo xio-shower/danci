@@ -7,8 +7,17 @@
   const STORAGE_KEYS = {
     CONFIG: "danci_sheet_config_v1",
     CACHE: "danci_vocab_cache_v1",
-    PROGRESS: "danci_learning_progress_v1",
-    PREFS: "danci_user_prefs_v1",
+    PROGRESS: "danci_learning_progress_v2",
+    PREFS: "danci_user_prefs_v2",
+  };
+
+  // --- SVG Icons ---
+  const ICONS = {
+    speaker: `<svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M19.114 5.636a9 9 0 010 12.728M16.463 8.288a5.25 5.25 0 010 7.424M6.75 8.25l4.72-4.72a.75.75 0 011.28.53v15.88a.75.75 0 01-1.28.53l-4.72-4.72H4.51c-.88 0-1.704-.507-1.938-1.354A9.01 9.01 0 012.25 12c0-.83.112-1.633.322-2.396C2.806 8.756 3.63 8.25 4.51 8.25H6.75z"/></svg>`,
+    mic: `<svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M12 18.75a6 6 0 006-6v-1.5m-6 7.5a6 6 0 01-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 01-3-3V4.5a3 3 0 116 0v8.25a3 3 0 01-3 3z"/></svg>`,
+    checkCircle: `<svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>`,
+    eyeOff: `<path stroke-linecap="round" stroke-linejoin="round" d="M3.98 8.223A10.477 10.477 0 001.934 12C3.226 16.338 7.244 19.5 12 19.5c.993 0 1.953-.138 2.863-.395M6.228 6.228A10.45 10.45 0 0112 4.5c4.756 0 8.773 3.162 10.065 7.498a10.523 10.523 0 01-4.293 5.774M6.228 6.228L3 3m3.228 3.228l3.65 3.65m7.894 7.894L21 21m-3.228-3.228l-3.65-3.65m0 0a3 3 0 10-4.243-4.243m4.242 4.242L9.88 9.88"/>`,
+    eyeOn: `<path stroke-linecap="round" stroke-linejoin="round" d="M2.036 12.322a1.012 1.012 0 010-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.573-3.007-9.963-7.178z"/><path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>`,
   };
 
   // --- State ---
@@ -18,78 +27,96 @@
       gid: DEFAULT_GID,
       url: `https://docs.google.com/spreadsheets/d/${DEFAULT_SHEET_ID}/edit?gid=${DEFAULT_GID}#gid=${DEFAULT_GID}`,
     }),
-    title: window.FALLBACK_SHEET_TITLE || "单词记忆本",
+    title: window.FALLBACK_SHEET_TITLE || "《Business Thinking for Designers》错题词汇与搭配记忆本",
     words: [],
-    progress: loadJSON(STORAGE_KEYS.PROGRESS, {}), // { [key]: { status: 'mastered'|'review'|'none', correct: 0, wrong: 0 } }
+    progress: loadJSON(STORAGE_KEYS.PROGRESS, {
+      items: {}, // { [key]: { mastered: bool, review: bool } }
+      testedCount: 0,
+      correctCount: 0,
+    }),
     prefs: loadJSON(STORAGE_KEYS.PREFS, {
-      mode: "list", // 'list' | 'quiz'
-      hideTranslation: false,
+      viewMode: "card", // 'card' | 'list'
+      globalHideTranslation: true,
       accent: "en-US", // 'en-US' | 'en-GB'
-      rate: 1.0, // 1.0 | 0.75
+      rate: 1.0, // 1.0 | 0.7
       filter: "all",
     }),
     searchQuery: "",
-    orderSeed: null, // array of keys when shuffled
+    shuffledOrder: null, // null = original order, array of keys = shuffled
+    currentIndex: 0,
     newWordKeys: new Set(),
-    updatedWordKeys: new Set(),
     lastSyncAt: null,
     lastSyncSummary: "",
-    // Per-card transient UI state (not persisted)
-    revealedKeys: new Set(),
-    inlineTestResults: {}, // { [key]: { userInput, isCorrect, overridden } }
-    shadowResults: {}, // { [key]: { transcript, passed, status: 'listening'|'done'|'error', message } }
-    // Quiz state
-    quizIndex: 0,
-    quizShowHint: false,
-    quizAnswerState: null, // null | { userInput, isCorrect, skipped, overridden }
-    quizSessionStats: { right: 0, total: 0 },
+    // Per-card transient UI states
+    itemRevealOverrides: {}, // { [key]: boolean }
+    itemInputs: {}, // { [key]: string }
+    itemCheckResults: {}, // { [key]: { isCorrect, userInput, overridden } }
+    itemExpandedListContext: {}, // { [key]: boolean }
+    shadowResults: {}, // { [key]: { status, message, passed } }
   };
 
+  // --- TTS Session State ---
+  const ttsSession = {
+    isSpeaking: false,
+    activeToken: 0,
+    activeKey: null,
+    activeTriggerEl: null,
+    watchdogTimer: null,
+    resumeKeepAliveTimer: null,
+  };
+
+  let availableVoices = [];
   let activeRecognition = null;
-  let activeSpeakingEl = null;
   let toastTimer = null;
   let lastAutoCheckTs = 0;
 
   // --- DOM Elements ---
   const els = {
     title: document.getElementById("notebook-title"),
+    statTested: document.getElementById("stat-tested"),
+    statAccuracy: document.getElementById("stat-accuracy"),
+    statMastered: document.getElementById("stat-mastered"),
+    statTotal: document.getElementById("stat-total"),
     syncPill: document.getElementById("sync-status-pill"),
     syncText: document.getElementById("sync-status-text"),
-    btnSyncNow: document.getElementById("btn-sync-now"),
     linkSourceSheet: document.getElementById("link-source-sheet"),
     btnOpenSettings: document.getElementById("btn-open-settings"),
+    btnModeCard: document.getElementById("btn-mode-card"),
+    btnModeList: document.getElementById("btn-mode-list"),
+    btnGlobalTrans: document.getElementById("btn-global-trans"),
+    iconGlobalEye: document.getElementById("icon-global-eye"),
+    textGlobalTrans: document.getElementById("text-global-trans"),
+    btnAccentUS: document.getElementById("btn-accent-us"),
+    btnAccentUK: document.getElementById("btn-accent-uk"),
+    btnRateNormal: document.getElementById("btn-rate-normal"),
+    btnRateSlow: document.getElementById("btn-rate-slow"),
+    filterSelect: document.getElementById("filter-select"),
+    btnOrderShuffle: document.getElementById("btn-order-shuffle"),
+    btnOrderDefault: document.getElementById("btn-order-default"),
+    searchInput: document.getElementById("search-input"),
     updateBanner: document.getElementById("update-banner"),
     updateBannerMsg: document.getElementById("update-banner-message"),
     btnViewNewWords: document.getElementById("btn-view-new-words"),
     btnDismissBanner: document.getElementById("btn-dismiss-banner"),
-    tabList: document.getElementById("tab-list"),
-    tabQuiz: document.getElementById("tab-quiz"),
-    hideTransLabel: document.getElementById("hide-trans-label"),
-    toggleHideTrans: document.getElementById("toggle-hide-translation"),
-    btnAccentUS: document.getElementById("btn-accent-us"),
-    btnAccentUK: document.getElementById("btn-accent-uk"),
-    btnSpeedToggle: document.getElementById("btn-speed-toggle"),
-    filterPills: document.getElementById("filter-pills"),
-    pillFilterNew: document.getElementById("pill-filter-new"),
-    countAll: document.getElementById("count-all"),
-    countUnmastered: document.getElementById("count-unmastered"),
-    countReview: document.getElementById("count-review"),
-    countMastered: document.getElementById("count-mastered"),
-    countNew: document.getElementById("count-new"),
-    searchInput: document.getElementById("search-input"),
-    btnShuffle: document.getElementById("btn-shuffle"),
-    progressLabel: document.getElementById("progress-label"),
-    progressBarFill: document.getElementById("progress-bar-fill"),
-    progressPercent: document.getElementById("progress-percent"),
-    listView: document.getElementById("list-view"),
-    quizView: document.getElementById("quiz-view"),
+    cardModeSection: document.getElementById("card-mode-section"),
+    cardCounter: document.getElementById("card-counter"),
+    cardProgressFill: document.getElementById("card-progress-fill"),
+    cardModeSlot: document.getElementById("card-mode-slot"),
+    cardBottomNav: document.getElementById("card-bottom-nav"),
+    btnPrevCard: document.getElementById("btn-prev-card"),
+    btnSpeakCurrent: document.getElementById("btn-speak-current"),
+    btnNextCard: document.getElementById("btn-next-card"),
+    listModeSection: document.getElementById("list-mode-section"),
+    footerTotalText: document.getElementById("footer-total-text"),
+    ttsStatusBadge: document.getElementById("tts-status-badge"),
+    ttsStatusText: document.getElementById("tts-status-text"),
+    btnResetFooter: document.getElementById("btn-reset-footer"),
     settingsModal: document.getElementById("settings-modal"),
     settingsForm: document.getElementById("settings-form"),
     inputSheetUrl: document.getElementById("input-sheet-url"),
     settingsSyncMeta: document.getElementById("settings-sync-meta"),
     btnCloseSettings: document.getElementById("btn-close-settings"),
     btnCancelSettings: document.getElementById("btn-cancel-settings"),
-    btnResetProgress: document.getElementById("btn-reset-progress"),
     toast: document.getElementById("toast"),
   };
 
@@ -107,7 +134,7 @@
     try {
       localStorage.setItem(key, JSON.stringify(value));
     } catch {
-      // Ignore quota errors
+      // ignore storage quota errors
     }
   }
 
@@ -137,74 +164,56 @@
     clearTimeout(toastTimer);
     toastTimer = setTimeout(() => {
       els.toast.classList.remove("show");
-    }, 2600);
+    }, 2400);
   }
 
   function formatTime(ts) {
-    if (!ts) return "从未";
+    if (!ts) return "尚未同步";
     const d = new Date(ts);
-    const hh = String(d.getHours()).padStart(2, "0");
-    const mm = String(d.getMinutes()).padStart(2, "0");
-    const ss = String(d.getSeconds()).padStart(2, "0");
-    return `${d.getMonth() + 1}/${d.getDate()} ${hh}:${mm}:${ss}`;
+    const pad = (n) => String(n).padStart(2, "0");
+    return `${d.getMonth() + 1}/${d.getDate()} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
   }
 
-  // --- Highlight term in sentence ---
-  function highlightSentence(sentence, term) {
-    if (!sentence) return "";
-    const safeSentence = escapeHTML(sentence);
-    if (!term) return safeSentence;
+  // --- Highlight term in sentence / IELTS example ---
+  function highlightTerm(text, term) {
+    if (!text) return "";
+    const safe = escapeHTML(text);
+    if (!term) return safe;
 
-    // Handle patterns like "put [sth] right to work"
-    const cleaned = term.replace(/\[[^\]]+\]/g, "___WILDCARD___").trim();
+    const cleaned = term.replace(/\[[^\]]+\]/g, "___WILD___").trim();
     const parts = cleaned
-      .split("___WILDCARD___")
+      .split("___WILD___")
       .map((p) => p.trim())
       .filter(Boolean);
-
-    if (parts.length === 0) return safeSentence;
+    if (parts.length === 0) return safe;
 
     try {
-      let pattern;
-      if (parts.length === 1) {
-        pattern = escapeRegex(escapeHTML(parts[0]));
-      } else {
-        pattern = parts
-          .map((p) => escapeRegex(escapeHTML(p)))
-          .join("\\s+(?:\\S+\\s+){0,4}?");
-      }
+      const pattern =
+        parts.length === 1
+          ? escapeRegex(escapeHTML(parts[0]))
+          : parts.map((p) => escapeRegex(escapeHTML(p))).join("\\s+(?:\\S+\\s+){0,4}?");
       const re = new RegExp(`(${pattern})`, "gi");
-      if (re.test(safeSentence)) {
-        return safeSentence.replace(re, '<mark class="term-mark">$1</mark>');
+      if (re.test(safe)) {
+        return safe.replace(re, '<mark class="term-mark">$1</mark>');
       }
     } catch {
-      // Fallback safely
+      // fallback
     }
-    return safeSentence;
+    return safe;
   }
 
-  // --- Format IELTS tip ---
-  function formatTipHTML(tip) {
-    if (!tip) return "";
-    const match = tip.match(/^(【[^】]+】)\s*(.*)$/);
-    if (match) {
-      return `<span class="tip-tag">${escapeHTML(match[1])}</span><span>${escapeHTML(match[2])}</span>`;
-    }
-    return `<span>${escapeHTML(tip)}</span>`;
-  }
+  function parseIeltsTip(tip) {
+    if (!tip) return { tag: "", body: "", speakable: "" };
+    const m = tip.match(/^(【[^】]+】)\s*(.*)$/);
+    const tag = m ? m[1] : "雅思写作 / 口语复用提示";
+    const body = m ? m[2] : tip;
 
-  function extractEnglishFromTip(tip) {
-    if (!tip) return "";
-    // Remove leading 【...】 tag and trailing Chinese parenthetical note
-    let text = tip.replace(/^【[^】]+】\s*/, "");
-    const exMatch = text.match(/例[：:]\s*(.+)$/);
-    if (exMatch) {
-      text = exMatch[1];
-    }
-    text = text.replace(/[（(]注[：:][^）)]*[）)]/g, "").trim();
-    // Only return if it has substantial English words
-    const englishLetters = (text.match(/[A-Za-z]/g) || []).length;
-    return englishLetters >= 12 ? text : "";
+    let speakable = body;
+    const exMatch = speakable.match(/例[：:]\s*(.+)$/);
+    if (exMatch) speakable = exMatch[1];
+    speakable = speakable.replace(/[（(]注[：:][^）)]*[）)]/g, "").trim();
+    const enCount = (speakable.match(/[A-Za-z]/g) || []).length;
+    return { tag, body, speakable: enCount >= 12 ? speakable : "" };
   }
 
   // --- Smart Chinese Translation Matcher ---
@@ -219,50 +228,43 @@
   function diceCoefficient(a, b) {
     if (!a || !b) return 0;
     if (a === b) return 1;
-    if (a.length < 2 || b.length < 2) {
-      return a.includes(b) || b.includes(a) ? 1 : 0;
-    }
-    const bigramsA = new Map();
+    if (a.length < 2 || b.length < 2) return a.includes(b) || b.includes(a) ? 1 : 0;
+    const mapA = new Map();
     for (let i = 0; i < a.length - 1; i++) {
       const bg = a.slice(i, i + 2);
-      bigramsA.set(bg, (bigramsA.get(bg) || 0) + 1);
+      mapA.set(bg, (mapA.get(bg) || 0) + 1);
     }
-    let intersection = 0;
+    let inter = 0;
     for (let i = 0; i < b.length - 1; i++) {
       const bg = b.slice(i, i + 2);
-      const count = bigramsA.get(bg) || 0;
-      if (count > 0) {
-        intersection++;
-        bigramsA.set(bg, count - 1);
+      const c = mapA.get(bg) || 0;
+      if (c > 0) {
+        inter++;
+        mapA.set(bg, c - 1);
       }
     }
-    return (2 * intersection) / (a.length - 1 + (b.length - 1));
+    return (2 * inter) / (a.length - 1 + (b.length - 1));
   }
 
-  function charRecall(userNorm, refNorm) {
-    if (!userNorm || !refNorm) return 0;
-    const refChars = new Set(refNorm.split(""));
+  function charRecall(u, ref) {
+    if (!u || !ref) return 0;
+    const set = new Set(ref.split(""));
     let hit = 0;
-    for (const ch of userNorm) {
-      if (refChars.has(ch)) hit++;
-    }
-    return hit / userNorm.length;
+    for (const ch of u) if (set.has(ch)) hit++;
+    return hit / u.length;
   }
 
   function checkTranslation(userInput, standardTranslation) {
     const rawUser = String(userInput || "").trim();
     if (!rawUser) return false;
-
     const userNorm = normalizeZh(rawUser);
     if (!userNorm) return false;
 
-    // Strip parenthetical explanations like （非“报道”） or （注意区分...）
     const coreOnly = String(standardTranslation || "")
       .replace(/（[^）]*）/g, "")
       .replace(/\([^)]*\)/g, "")
       .trim();
 
-    // Also keep full text without parentheses symbols for lenient match (e.g. "行业报告")
     const expanded = String(standardTranslation || "")
       .replace(/[（()）]/g, "")
       .trim();
@@ -272,7 +274,6 @@
       .map((s) => normalizeZh(s))
       .filter(Boolean);
 
-    // Also split user input if they entered multiple meanings
     const userSegments = rawUser
       .split(/[；;、/，,\s]+/)
       .map((s) => normalizeZh(s))
@@ -288,32 +289,330 @@
         if (seg.length >= 2 && u.includes(seg)) return true;
         if (diceCoefficient(u, seg) >= 0.6) return true;
         if (u.length >= 2 && seg.length >= 2) {
-          const r1 = charRecall(u, seg);
-          const r2 = charRecall(seg, u);
-          if (r1 >= 0.75 && r2 >= 0.5) return true;
+          if (charRecall(u, seg) >= 0.75 && charRecall(seg, u) >= 0.5) return true;
         }
       }
-      // Check against expanded text (without parentheses) for cases like "（行业）报告"
       const expNorm = normalizeZh(expanded);
       if (u.length >= 2 && expNorm.includes(u)) {
-        // Make sure user didn't type the "非..." negative example!
         const negMatches = [...String(standardTranslation || "").matchAll(/非[“"'「]?([^”"'」)）]+)/g)];
-        const isNegativeTrap = negMatches.some((m) => normalizeZh(m[1]).includes(u) || u.includes(normalizeZh(m[1])));
+        const isNegativeTrap = negMatches.some(
+          (m) => normalizeZh(m[1]).includes(u) || u.includes(normalizeZh(m[1]))
+        );
         if (!isNegativeTrap) return true;
       }
     }
-
     return false;
   }
 
-  // --- RFC-4180 CSV Parser ---
+  // --- Robust Chunked TTS Engine ---
+  function loadVoices() {
+    if ("speechSynthesis" in window) {
+      availableVoices = window.speechSynthesis.getVoices() || [];
+    }
+  }
+
+  function updateTtsStatus(text, status = "ready") {
+    els.ttsStatusText.textContent = text;
+    els.ttsStatusBadge.dataset.state = status;
+  }
+
+  function clearTtsTimers() {
+    if (ttsSession.watchdogTimer) {
+      clearTimeout(ttsSession.watchdogTimer);
+      ttsSession.watchdogTimer = null;
+    }
+    if (ttsSession.resumeKeepAliveTimer) {
+      clearInterval(ttsSession.resumeKeepAliveTimer);
+      ttsSession.resumeKeepAliveTimer = null;
+    }
+  }
+
+  function stopSpeaking(resetBadge = true) {
+    ttsSession.activeToken++;
+    clearTtsTimers();
+    ttsSession.isSpeaking = false;
+    ttsSession.activeKey = null;
+    if (ttsSession.activeTriggerEl) {
+      ttsSession.activeTriggerEl.classList.remove("speaking-active");
+      ttsSession.activeTriggerEl = null;
+    }
+    if ("speechSynthesis" in window) {
+      try {
+        window.speechSynthesis.cancel();
+      } catch {
+        // ignore
+      }
+    }
+    if (resetBadge) updateTtsStatus("语音就绪", "ready");
+  }
+
+  function normalizeSpeechText(raw) {
+    return String(raw || "")
+      .replace(/\[sth\]/gi, "something")
+      .replace(/\[sb\]/gi, "somebody")
+      .replace(/\[doing sth\]/gi, "doing something")
+      .replace(/\[[^\]]+\]/g, "")
+      .replace(/[\u201C\u201D\u201E\u201F\u00AB\u00BB]/g, '"')
+      .replace(/[\u2018\u2019\u201A\u201B]/g, "'")
+      .replace(/[\u2013\u2014\u2015]/g, ", ")
+      .replace(/\u2026/g, "... ")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function splitTextIntoChunks(text, maxLen = 115) {
+    if (!text) return [];
+    if (text.length <= maxLen) return [text];
+    const parts = text.match(/[^.!?:;]+[.!?:;]+(?=\s|$)|[^.!?:;]+$/g) || [text];
+    const chunks = [];
+    for (const p of parts) {
+      const part = p.trim();
+      if (!part) continue;
+      if (part.length <= maxLen) {
+        chunks.push(part);
+        continue;
+      }
+      const clauses = part.match(/[^,]+,?(?=\s|$)|[^,]+$/g) || [part];
+      let cur = "";
+      for (const c of clauses) {
+        const cl = c.trim();
+        if (!cl) continue;
+        if (!cur) cur = cl;
+        else if ((cur + " " + cl).length <= maxLen) cur += " " + cl;
+        else {
+          chunks.push(cur);
+          cur = cl;
+        }
+      }
+      if (cur) chunks.push(cur);
+    }
+    return chunks.length ? chunks : [text];
+  }
+
+  function pickVoiceForAccent(targetLang) {
+    if (!availableVoices.length) loadVoices();
+    if (!availableVoices.length) return null;
+    const langLower = (targetLang || "en-US").toLowerCase();
+    const exact = availableVoices.filter((v) => (v.lang || "").toLowerCase() === langLower);
+    const region = availableVoices.filter((v) =>
+      (v.lang || "").toLowerCase().replace("_", "-").startsWith(langLower)
+    );
+    const anyEn = availableVoices.filter((v) => (v.lang || "").toLowerCase().startsWith("en"));
+
+    const score = (v) => {
+      let s = 0;
+      const n = (v.name || "").toLowerCase();
+      if (/natural|online|neural/.test(n)) s += 30;
+      if (/google|samantha|daniel|aria|jenny|libby|guy/.test(n)) s += 20;
+      if (v.localService) s += 10;
+      return s;
+    };
+    const pool = exact.length ? exact : region.length ? region : anyEn.length ? anyEn : availableVoices;
+    return [...pool].sort((a, b) => score(b) - score(a))[0] || null;
+  }
+
+  function speakText(rawText, triggerEl = null, label = "正在朗读") {
+    const cleaned = normalizeSpeechText(rawText);
+    if (!cleaned) {
+      showToast("没有可朗读的英文内容");
+      return;
+    }
+
+    const targetLang = state.prefs.accent || "en-US";
+    const targetRate = state.prefs.rate || 1.0;
+    const sessionKey = `${targetLang}|${targetRate}|${cleaned}`;
+
+    // Click again to stop
+    if (ttsSession.isSpeaking && ttsSession.activeKey === sessionKey) {
+      stopSpeaking(true);
+      return;
+    }
+
+    if (!("speechSynthesis" in window) || typeof SpeechSynthesisUtterance === "undefined") {
+      updateTtsStatus("当前浏览器不支持语音合成", "error");
+      showToast("当前浏览器不支持语音朗读");
+      return;
+    }
+
+    stopSpeaking(false);
+    const token = ttsSession.activeToken;
+    const chunks = splitTextIntoChunks(cleaned, 115);
+    const voice = pickVoiceForAccent(targetLang);
+
+    ttsSession.isSpeaking = true;
+    ttsSession.activeKey = sessionKey;
+    ttsSession.activeTriggerEl = triggerEl;
+    if (triggerEl) triggerEl.classList.add("speaking-active");
+
+    updateTtsStatus(`${label} · ${targetLang}`, "speaking");
+
+    ttsSession.resumeKeepAliveTimer = setInterval(() => {
+      if (token !== ttsSession.activeToken || !ttsSession.isSpeaking) {
+        clearInterval(ttsSession.resumeKeepAliveTimer);
+        return;
+      }
+      try {
+        if (window.speechSynthesis.paused) window.speechSynthesis.resume();
+      } catch {
+        // ignore
+      }
+    }, 4000);
+
+    const finish = (hadError = false) => {
+      if (token !== ttsSession.activeToken) return;
+      clearTtsTimers();
+      ttsSession.isSpeaking = false;
+      ttsSession.activeKey = null;
+      if (ttsSession.activeTriggerEl) {
+        ttsSession.activeTriggerEl.classList.remove("speaking-active");
+        ttsSession.activeTriggerEl = null;
+      }
+      updateTtsStatus(hadError ? "朗读受阻，请重试" : "语音就绪", hadError ? "error" : "ready");
+    };
+
+    const speakChunk = (idx) => {
+      if (token !== ttsSession.activeToken) return;
+      if (idx >= chunks.length) {
+        finish(false);
+        return;
+      }
+
+      let settled = false;
+      const next = (err = false) => {
+        if (settled || token !== ttsSession.activeToken) return;
+        settled = true;
+        if (ttsSession.watchdogTimer) {
+          clearTimeout(ttsSession.watchdogTimer);
+          ttsSession.watchdogTimer = null;
+        }
+        if (err && idx === chunks.length - 1) {
+          finish(true);
+        } else {
+          setTimeout(() => speakChunk(idx + 1), 35);
+        }
+      };
+
+      try {
+        const utter = new SpeechSynthesisUtterance(chunks[idx]);
+        utter.lang = targetLang;
+        utter.rate = targetRate;
+        if (voice) utter.voice = voice;
+        utter.onend = () => next(false);
+        utter.onerror = (ev) => {
+          const code = ev && ev.error;
+          if (code === "interrupted" || code === "canceled") return;
+          next(true);
+        };
+        ttsSession.watchdogTimer = setTimeout(() => next(false), Math.max(7000, chunks[idx].length * 140));
+        window.speechSynthesis.speak(utter);
+      } catch {
+        next(true);
+      }
+    };
+
+    speakChunk(0);
+  }
+
+  // --- Speech Recognition (Voice Shadowing / 跟读检测) ---
+  function normalizeEn(str) {
+    return String(str || "")
+      .toLowerCase()
+      .replace(/\[sth\]/g, "something")
+      .replace(/\[sb\]/g, "somebody")
+      .replace(/[^a-z0-9\s']/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function compareSpeech(spoken, target) {
+    const s = normalizeEn(spoken);
+    const t = normalizeEn(target);
+    if (!s || !t) return false;
+    if (s === t || s.includes(t) || t.includes(s)) return true;
+    const sWords = new Set(s.split(" "));
+    const tWords = t.split(" ").filter(Boolean);
+    let hits = 0;
+    for (const tw of tWords) if (sWords.has(tw)) hits++;
+    return hits / tWords.length >= 0.65;
+  }
+
+  function startShadowing(wordObj) {
+    const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRec) {
+      showToast("当前浏览器不支持语音识别，已为你朗读供跟读");
+      speakText(wordObj.word, null, "跟读发音");
+      return;
+    }
+
+    if (activeRecognition) {
+      try {
+        activeRecognition.stop();
+      } catch {
+        // ignore
+      }
+      activeRecognition = null;
+    }
+    stopSpeaking(true);
+
+    const rec = new SpeechRec();
+    rec.lang = state.prefs.accent || "en-US";
+    rec.interimResults = false;
+    rec.maxAlternatives = 3;
+    activeRecognition = rec;
+
+    state.shadowResults[wordObj.key] = {
+      status: "listening",
+      message: "正在聆听，请清晰跟读该单词/短语…",
+    };
+    renderCurrentView();
+
+    rec.onresult = (ev) => {
+      const alts = [];
+      for (let i = 0; i < ev.results[0].length; i++) alts.push(ev.results[0][i].transcript);
+      const best = alts[0] || "";
+      const passed = alts.some((tr) => compareSpeech(tr, wordObj.word));
+      state.shadowResults[wordObj.key] = {
+        status: "done",
+        passed,
+        message: passed
+          ? `跟读识别：“${best}” — 发音很棒！`
+          : `跟读识别：“${best}” — 可以再听一遍跟读`,
+      };
+      activeRecognition = null;
+      renderCurrentView();
+    };
+
+    rec.onerror = (ev) => {
+      const msg =
+        ev.error === "not-allowed"
+          ? "未获得麦克风权限，请在浏览器地址栏允许麦克风访问"
+          : ev.error === "no-speech"
+          ? "没有听到声音，请靠近麦克风再试"
+          : `跟读识别中断（${ev.error}）`;
+      state.shadowResults[wordObj.key] = { status: "error", message: msg };
+      activeRecognition = null;
+      renderCurrentView();
+    };
+
+    rec.onend = () => {
+      if (activeRecognition === rec) activeRecognition = null;
+    };
+
+    try {
+      rec.start();
+    } catch {
+      showToast("无法启动麦克风，请重试");
+    }
+  }
+
+  // --- RFC-4180 CSV Parser & Google Sheets Auto-Sync ---
   function parseCSV(text) {
     const rows = [];
     let row = [];
     let field = "";
     let inQuotes = false;
-
     const clean = text.replace(/^\uFEFF/, "");
+
     for (let i = 0; i < clean.length; i++) {
       const ch = clean[i];
       if (inQuotes) {
@@ -328,9 +627,8 @@
           field += ch;
         }
       } else {
-        if (ch === '"') {
-          inQuotes = true;
-        } else if (ch === ",") {
+        if (ch === '"') inQuotes = true;
+        else if (ch === ",") {
           row.push(field);
           field = "";
         } else if (ch === "\r") {
@@ -365,13 +663,11 @@
       const r = rows[i].map((c) => String(c || "").trim());
       if (!r.some(Boolean)) continue;
 
-      // Detect single-cell title row
-      if (i === 0 && r[0] && (!r[1] || r[1] === "")) {
+      if (i === 0 && r[0] && !r[1]) {
         sheetTitle = r[0];
         continue;
       }
 
-      // Skip header row
       if (
         /^(单词|词汇|word|term|phrase)/i.test(r[0]) &&
         r[1] &&
@@ -389,23 +685,25 @@
         const key = wordKey(word);
         if (!seen.has(key)) {
           seen.add(key);
-          words.push({ key, word, translation, sentence, tip });
+          words.push({
+            id: words.length + 1,
+            key,
+            word,
+            translation,
+            sentence,
+            tip,
+          });
         }
       }
     }
-
     return { sheetTitle, words };
   }
 
-  // --- Google Sheets Fetch (CSV + JSONP fallback) ---
   function parseSheetUrl(url) {
     const idMatch = String(url || "").match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
     if (!idMatch) return null;
     const gidMatch = String(url || "").match(/[?#&]gid=(\d+)/);
-    return {
-      sheetId: idMatch[1],
-      gid: gidMatch ? gidMatch[1] : "0",
-    };
+    return { sheetId: idMatch[1], gid: gidMatch ? gidMatch[1] : "0" };
   }
 
   async function fetchSheetViaCSV(sheetId, gid) {
@@ -413,48 +711,44 @@
     const res = await fetch(url, { cache: "no-store" });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const text = await res.text();
-    // Guard against HTML login redirect
     if (/^\s*<!doctype html|^\s*<html/i.test(text)) {
-      throw new Error("表格未开启公开可读权限（需要设置为「知道链接的任何人可查看」）");
+      throw new Error("表格未开启公开可读权限（需设为「知道链接的任何人可查看」）");
     }
-    const rows = parseCSV(text);
-    return extractVocabFromRows(rows);
+    return extractVocabFromRows(parseCSV(text));
   }
 
   function fetchSheetViaJSONP(sheetId, gid) {
     return new Promise((resolve, reject) => {
-      const cbName = `__danciGvizCb_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
+      const cbName = `__danciGviz_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
       const script = document.createElement("script");
-      const timeout = setTimeout(() => {
+      const timer = setTimeout(() => {
         cleanup();
         reject(new Error("JSONP 请求超时"));
       }, 10000);
 
       function cleanup() {
-        clearTimeout(timeout);
+        clearTimeout(timer);
         delete window[cbName];
         if (script.parentNode) script.parentNode.removeChild(script);
       }
 
-      window[cbName] = (response) => {
+      window[cbName] = (resp) => {
         cleanup();
         try {
-          if (!response || response.status === "error" || !response.table) {
+          if (!resp || resp.status === "error" || !resp.table) {
             reject(new Error("Google 表格返回异常"));
             return;
           }
           const rows = [];
-          const cols = response.table.cols || [];
-          const colLabels = cols.map((c) => (c && c.label ? String(c.label).trim() : ""));
-          if (colLabels.some(Boolean)) {
-            rows.push(colLabels);
-          }
-          for (const tr of response.table.rows || []) {
-            const cells = (tr.c || []).map((cell) => {
-              if (!cell || cell.v == null) return "";
-              return String(cell.f != null ? cell.f : cell.v);
-            });
-            rows.push(cells);
+          const colLabels = (resp.table.cols || []).map((c) => (c && c.label ? String(c.label).trim() : ""));
+          if (colLabels.some(Boolean)) rows.push(colLabels);
+          for (const tr of resp.table.rows || []) {
+            rows.push(
+              (tr.c || []).map((cell) => {
+                if (!cell || cell.v == null) return "";
+                return String(cell.f != null ? cell.f : cell.v);
+              })
+            );
           }
           resolve(extractVocabFromRows(rows));
         } catch (err) {
@@ -472,58 +766,56 @@
     });
   }
 
+  function setSyncUI(status, text) {
+    els.syncPill.dataset.state = status;
+    els.syncText.textContent = text;
+  }
+
   async function syncFromGoogleSheet(isManual = false) {
-    setSyncUI("syncing", "正在探测表格更新…");
-    els.btnSyncNow.disabled = true;
+    setSyncUI("syncing", "检查更新中…");
+    els.syncPill.disabled = true;
     lastAutoCheckTs = Date.now();
 
     try {
       let data;
       try {
         data = await fetchSheetViaCSV(state.config.sheetId, state.config.gid);
-      } catch (csvErr) {
-        // Fallback to JSONP (especially helpful if opened via file://)
+      } catch {
         data = await fetchSheetViaJSONP(state.config.sheetId, state.config.gid);
       }
 
       if (!data.words || data.words.length === 0) {
-        throw new Error("未解析到有效单词行，请检查表格前两列是否为「单词」与「翻译」");
+        throw new Error("未解析到有效词汇行");
       }
 
-      // Compute diff against current local words
       const oldMap = new Map(state.words.map((w) => [w.key, w]));
       const newMap = new Map(data.words.map((w) => [w.key, w]));
 
       const added = [];
-      const updated = [];
+      let updatedCount = 0;
       let removedCount = 0;
 
       for (const w of data.words) {
         const prev = oldMap.get(w.key);
-        if (!prev) {
-          added.push(w.key);
-        } else if (
+        if (!prev) added.push(w.key);
+        else if (
           prev.translation !== w.translation ||
           prev.sentence !== w.sentence ||
           prev.tip !== w.tip ||
           prev.word !== w.word
         ) {
-          updated.push(w.key);
+          updatedCount++;
         }
       }
-
-      for (const prevKey of oldMap.keys()) {
-        if (!newMap.has(prevKey)) removedCount++;
+      for (const k of oldMap.keys()) {
+        if (!newMap.has(k)) removedCount++;
       }
 
-      const hadExistingCache = state.words.length > 0 && Boolean(loadJSON(STORAGE_KEYS.CACHE, null));
+      const hadExistingCache = Boolean(loadJSON(STORAGE_KEYS.CACHE, null));
       state.words = data.words;
-      if (data.sheetTitle) {
-        state.title = data.sheetTitle;
-      }
+      if (data.sheetTitle) state.title = data.sheetTitle;
       state.lastSyncAt = Date.now();
 
-      // Persist updated vocab cache
       saveJSON(STORAGE_KEYS.CACHE, {
         sheetId: state.config.sheetId,
         gid: state.config.gid,
@@ -532,268 +824,83 @@
         syncedAt: state.lastSyncAt,
       });
 
-      const hasChanges = added.length > 0 || updated.length > 0 || removedCount > 0;
-
+      const hasChanges = added.length > 0 || updatedCount > 0 || removedCount > 0;
       if (hasChanges && hadExistingCache) {
         state.newWordKeys = new Set(added);
-        state.updatedWordKeys = new Set(updated);
         const parts = [];
         if (added.length) parts.push(`新增 ${added.length} 词`);
-        if (updated.length) parts.push(`更新 ${updated.length} 词`);
+        if (updatedCount) parts.push(`更新 ${updatedCount} 词`);
         if (removedCount) parts.push(`移除 ${removedCount} 词`);
         const summary = parts.join("，");
         state.lastSyncSummary = summary;
-
         setSyncUI("updated", `已更新：${summary}`);
-        showUpdateBanner(`检测到 Google 表格有变动，已自动同步到词库：${summary}。`, added.length > 0);
+        els.updateBannerMsg.textContent = `检测到 Google 表格词库变动，已自动同步：${summary}。`;
+        els.btnViewNewWords.hidden = added.length === 0;
+        els.updateBanner.hidden = false;
         if (isManual) showToast(`同步完成：${summary}`);
       } else {
         state.lastSyncSummary = `共 ${state.words.length} 词，已是最新`;
-        setSyncUI("ok", `已自动同步 · ${state.words.length} 词`);
+        setSyncUI("ok", `已同步 · ${state.words.length} 词`);
         if (isManual) showToast(`已是最新词库（共 ${state.words.length} 词）`);
       }
 
       renderAll();
     } catch (err) {
       console.error("Sync failed:", err);
-      setSyncUI("error", "同步失败，当前使用本地缓存");
-      if (isManual) {
-        showToast(`同步失败：${err.message}`);
-      }
+      setSyncUI("error", "同步失败 · 点此重试");
+      if (isManual) showToast(`同步失败：${err.message}`);
     } finally {
-      els.btnSyncNow.disabled = false;
+      els.syncPill.disabled = false;
     }
   }
 
-  function setSyncUI(status, text) {
-    els.syncPill.dataset.state = status;
-    els.syncText.textContent = text;
+  // --- Progress Helpers ---
+  function getItemProgress(key) {
+    return state.progress.items[key] || { mastered: false, review: false };
   }
 
-  function showUpdateBanner(message, hasNewWords) {
-    els.updateBannerMsg.textContent = message;
-    els.btnViewNewWords.hidden = !hasNewWords;
-    els.updateBanner.hidden = false;
+  function saveProgress() {
+    saveJSON(STORAGE_KEYS.PROGRESS, state.progress);
   }
 
-  // --- Speech Synthesis (TTS) ---
-  function cleanForSpeech(text) {
-    return String(text || "")
-      .replace(/\[sth\]/gi, "something")
-      .replace(/\[sb\]/gi, "somebody")
-      .replace(/\[[^\]]+\]/g, "")
-      .trim();
-  }
-
-  function pickVoice(lang) {
-    if (!("speechSynthesis" in window)) return null;
-    const voices = window.speechSynthesis.getVoices();
-    if (!voices || voices.length === 0) return null;
-
-    const exact = voices.filter((v) => v.lang.toLowerCase() === lang.toLowerCase());
-    const preferred =
-      exact.find((v) => /google|natural|samantha|daniel|aria|jenny|libby/i.test(v.name)) ||
-      exact[0] ||
-      voices.find((v) => v.lang.toLowerCase().startsWith(lang.slice(0, 2).toLowerCase()));
-    return preferred || null;
-  }
-
-  function speakText(text, triggerEl = null, customRate = null) {
-    if (!("speechSynthesis" in window)) {
-      showToast("当前浏览器不支持语音朗读");
-      return;
-    }
-    const content = cleanForSpeech(text);
-    if (!content) return;
-
-    window.speechSynthesis.cancel();
-    if (activeSpeakingEl) {
-      activeSpeakingEl.classList.remove("speaking", "is-active");
-      activeSpeakingEl = null;
-    }
-
-    const utter = new SpeechSynthesisUtterance(content);
-    utter.lang = state.prefs.accent;
-    utter.rate = customRate || state.prefs.rate;
-    const voice = pickVoice(state.prefs.accent);
-    if (voice) utter.voice = voice;
-
-    if (triggerEl) {
-      activeSpeakingEl = triggerEl;
-      triggerEl.classList.add(triggerEl.classList.contains("audio-btn") ? "is-active" : "speaking");
-    }
-
-    utter.onend = () => {
-      if (triggerEl) triggerEl.classList.remove("speaking", "is-active");
-      if (activeSpeakingEl === triggerEl) activeSpeakingEl = null;
+  function toggleMastered(key) {
+    const cur = getItemProgress(key);
+    state.progress.items[key] = {
+      mastered: !cur.mastered,
+      review: !cur.mastered ? false : cur.review,
     };
-    utter.onerror = () => {
-      if (triggerEl) triggerEl.classList.remove("speaking", "is-active");
-      if (activeSpeakingEl === triggerEl) activeSpeakingEl = null;
-    };
-
-    window.speechSynthesis.speak(utter);
-  }
-
-  // --- Speech Recognition (Shadowing / 跟读) ---
-  function normalizeEn(str) {
-    return String(str || "")
-      .toLowerCase()
-      .replace(/\[sth\]/g, "something")
-      .replace(/\[sb\]/g, "somebody")
-      .replace(/[^a-z0-9\s']/g, " ")
-      .replace(/\s+/g, " ")
-      .trim();
-  }
-
-  function compareSpeech(spoken, target) {
-    const s = normalizeEn(spoken);
-    const t = normalizeEn(target);
-    if (!s || !t) return false;
-    if (s === t || s.includes(t) || t.includes(s)) return true;
-    const sWords = new Set(s.split(" "));
-    const tWords = t.split(" ").filter(Boolean);
-    let hits = 0;
-    for (const tw of tWords) {
-      if (sWords.has(tw)) hits++;
-    }
-    return hits / tWords.length >= 0.65;
-  }
-
-  function startShadowing(wordObj, triggerEl) {
-    const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SpeechRec) {
-      // Graceful fallback: play slow audio for manual shadowing
-      showToast("当前浏览器不支持语音识别跟读，已为你慢速朗读供跟读");
-      speakText(wordObj.word, triggerEl, 0.75);
-      return;
-    }
-
-    if (activeRecognition) {
-      try {
-        activeRecognition.stop();
-      } catch {
-        // ignore
-      }
-      activeRecognition = null;
-    }
-
-    window.speechSynthesis && window.speechSynthesis.cancel();
-
-    const rec = new SpeechRec();
-    rec.lang = state.prefs.accent;
-    rec.interimResults = false;
-    rec.maxAlternatives = 3;
-    activeRecognition = rec;
-
-    state.shadowResults[wordObj.key] = {
-      status: "listening",
-      message: "正在聆听，请清晰朗读该单词/短语…",
-    };
+    saveProgress();
+    updateHeaderStats();
     renderCurrentView();
+  }
 
-    rec.onresult = (event) => {
-      const results = event.results[0];
-      const transcripts = [];
-      for (let i = 0; i < results.length; i++) {
-        transcripts.push(results[i].transcript);
-      }
-      const best = transcripts[0] || "";
-      const passed = transcripts.some((tr) => compareSpeech(tr, wordObj.word));
-      state.shadowResults[wordObj.key] = {
-        status: "done",
-        transcript: best,
-        passed,
-        message: passed
-          ? `跟读识别：“${best}” — 发音很棒！`
-          : `跟读识别：“${best}” — 可以再听一次试试`,
-      };
-      activeRecognition = null;
-      renderCurrentView();
-    };
-
-    rec.onerror = (event) => {
-      const msg =
-        event.error === "not-allowed"
-          ? "未获得麦克风权限，请在浏览器地址栏允许麦克风访问"
-          : event.error === "no-speech"
-          ? "没有听到声音，请靠近麦克风再试一次"
-          : `语音识别中断（${event.error}）`;
-      state.shadowResults[wordObj.key] = {
-        status: "error",
-        message: msg,
-      };
-      activeRecognition = null;
-      renderCurrentView();
-    };
-
-    rec.onend = () => {
-      if (activeRecognition === rec) {
-        activeRecognition = null;
-      }
-    };
-
-    try {
-      rec.start();
-    } catch {
-      showToast("无法启动麦克风，请重试");
+  function isTranslationVisible(key) {
+    if (key in state.itemRevealOverrides) {
+      return Boolean(state.itemRevealOverrides[key]);
     }
-  }
-
-  // --- Progress Management ---
-  function getProgress(key) {
-    return state.progress[key] || { status: "none", correct: 0, wrong: 0 };
-  }
-
-  function setWordStatus(key, status) {
-    const prev = getProgress(key);
-    state.progress[key] = { ...prev, status };
-    saveJSON(STORAGE_KEYS.PROGRESS, state.progress);
-    updateCountsAndProgress();
-  }
-
-  function recordTestAttempt(key, isCorrect) {
-    const prev = getProgress(key);
-    const nextStatus = isCorrect
-      ? prev.status === "review"
-        ? "none"
-        : prev.status
-      : "review";
-    state.progress[key] = {
-      status: nextStatus,
-      correct: (prev.correct || 0) + (isCorrect ? 1 : 0),
-      wrong: (prev.wrong || 0) + (isCorrect ? 0 : 1),
-    };
-    saveJSON(STORAGE_KEYS.PROGRESS, state.progress);
-    updateCountsAndProgress();
+    return !state.prefs.globalHideTranslation;
   }
 
   // --- Filtering & Ordering ---
   function getFilteredWords() {
     let list = [...state.words];
 
-    // Apply custom shuffle order if set
-    if (state.orderSeed && state.orderSeed.length > 0) {
-      const indexMap = new Map(state.orderSeed.map((k, idx) => [k, idx]));
-      list.sort((a, b) => {
-        const ia = indexMap.has(a.key) ? indexMap.get(a.key) : 999999;
-        const ib = indexMap.has(b.key) ? indexMap.get(b.key) : 999999;
-        return ia - ib;
-      });
+    if (state.shuffledOrder && state.shuffledOrder.length > 0) {
+      const idxMap = new Map(state.shuffledOrder.map((k, i) => [k, i]));
+      list.sort((a, b) => (idxMap.get(a.key) ?? 999999) - (idxMap.get(b.key) ?? 999999));
     }
 
-    // Filter by status
-    if (state.prefs.filter === "unmastered") {
-      list = list.filter((w) => getProgress(w.key).status !== "mastered");
-    } else if (state.prefs.filter === "review") {
-      list = list.filter((w) => getProgress(w.key).status === "review");
-    } else if (state.prefs.filter === "mastered") {
-      list = list.filter((w) => getProgress(w.key).status === "mastered");
-    } else if (state.prefs.filter === "new") {
+    const f = state.prefs.filter;
+    if (f === "unmastered") {
+      list = list.filter((w) => !getItemProgress(w.key).mastered);
+    } else if (f === "review") {
+      list = list.filter((w) => getItemProgress(w.key).review);
+    } else if (f === "mastered") {
+      list = list.filter((w) => getItemProgress(w.key).mastered);
+    } else if (f === "new") {
       list = list.filter((w) => state.newWordKeys.has(w.key));
     }
 
-    // Search filter
     const q = state.searchQuery.trim().toLowerCase();
     if (q) {
       list = list.filter(
@@ -804,715 +911,586 @@
           w.tip.toLowerCase().includes(q)
       );
     }
-
     return list;
   }
 
-  function updateCountsAndProgress() {
+  function updateHeaderStats() {
     const total = state.words.length;
     let mastered = 0;
     let review = 0;
-
     for (const w of state.words) {
-      const st = getProgress(w.key).status;
-      if (st === "mastered") mastered++;
-      else if (st === "review") review++;
+      const p = getItemProgress(w.key);
+      if (p.mastered) mastered++;
+      if (p.review) review++;
     }
-
     const unmastered = total - mastered;
-    const newCount = state.newWordKeys.size;
 
-    els.countAll.textContent = total;
-    els.countUnmastered.textContent = unmastered;
-    els.countReview.textContent = review;
-    els.countMastered.textContent = mastered;
-    els.countNew.textContent = newCount;
-    els.pillFilterNew.hidden = newCount === 0;
+    els.statTotal.textContent = total;
+    els.statMastered.textContent = mastered;
+    els.statTested.textContent = state.progress.testedCount || 0;
+    els.statAccuracy.textContent =
+      state.progress.testedCount > 0
+        ? `${Math.round((state.progress.correctCount / state.progress.testedCount) * 100)}%`
+        : "--";
 
-    const pct = total > 0 ? Math.round((mastered / total) * 100) : 0;
-    els.progressLabel.textContent = `已掌握 ${mastered} / ${total}`;
-    els.progressBarFill.style.width = `${pct}%`;
-    els.progressPercent.textContent = `${pct}%`;
+    els.footerTotalText.textContent = `共收录 ${total} 条《Business Thinking for Designers》核心错题词汇与搭配（自动同步 Google 表格）`;
+
+    // Update filter dropdown options
+    const curVal = state.prefs.filter;
+    const opts = [
+      { value: "all", label: `全部词汇 (${total})` },
+      { value: "unmastered", label: `未掌握 (${unmastered})` },
+      { value: "review", label: `错题需复习 (${review})` },
+      { value: "mastered", label: `已掌握 (${mastered})` },
+    ];
+    if (state.newWordKeys.size > 0) {
+      opts.push({ value: "new", label: `本次新增 (${state.newWordKeys.size})` });
+    }
+    els.filterSelect.innerHTML = opts
+      .map((o) => `<option value="${o.value}">${escapeHTML(o.label)}</option>`)
+      .join("");
+    els.filterSelect.value = opts.some((o) => o.value === curVal) ? curVal : "all";
   }
 
-  // --- Rendering: List View ---
-  function renderListView() {
-    const words = getFilteredWords();
-    if (words.length === 0) {
-      els.listView.innerHTML = `
-        <div class="empty-state">
-          <p>当前筛选条件下没有匹配的单词。</p>
-          <button type="button" class="btn btn-sm" id="btn-clear-filters">查看全部单词</button>
+  // --- Shared Card HTML Builder ---
+  function buildVocabCardHTML(w, isCardMode) {
+    const prog = getItemProgress(w.key);
+    const showTrans = isTranslationVisible(w.key);
+    const userVal = state.itemInputs[w.key] || "";
+    const checkRes = state.itemCheckResults[w.key];
+    const shadowRes = state.shadowResults[w.key];
+    const isNew = state.newWordKeys.has(w.key);
+    const ielts = parseIeltsTip(w.tip);
+    const showContext = isCardMode || Boolean(state.itemExpandedListContext[w.key]);
+
+    const feedbackHTML = checkRes
+      ? `
+        <div class="check-feedback ${checkRes.isCorrect || checkRes.overridden ? "is-correct" : "is-wrong"}">
+          <span>${
+            checkRes.isCorrect
+              ? "✓ 回答正确！释义准确。"
+              : checkRes.overridden
+              ? "✓ 已手动判定为答对"
+              : `✕ 略有偏差（你填写了：${escapeHTML(checkRes.userInput)}），请对照下方参考释义`
+          }</span>
+          ${
+            !checkRes.isCorrect && !checkRes.overridden
+              ? `<button type="button" class="btn-override" data-action="override-check">意思相近，算我答对</button>`
+              : ""
+          }
         </div>
+      `
+      : "";
+
+    const shadowHTML = shadowRes
+      ? `
+        <div class="shadow-feedback ${
+          shadowRes.status === "done" ? (shadowRes.passed ? "pass" : "retry") : ""
+        }">
+          <span>${escapeHTML(shadowRes.message)}</span>
+          <button type="button" class="btn-secondary btn-sm" data-action="clear-shadow">关闭</button>
+        </div>
+      `
+      : "";
+
+    const translationBlockHTML = showTrans
+      ? `
+        <div class="translation-revealed-box">
+          <div>
+            <span class="translation-label">参考释义与易错点</span>
+            <p class="translation-value">${escapeHTML(w.translation)}</p>
+          </div>
+          <button type="button" class="btn-secondary btn-sm" data-action="toggle-trans">隐藏</button>
+        </div>
+      `
+      : `
+        <button type="button" class="translation-hidden-bar" data-action="toggle-trans">
+          <span>参考中文释义已隐藏（先默写测试，或点击此处偷看答案）</span>
+          <span class="reveal-link">揭晓</span>
+        </button>
       `;
-      const btn = document.getElementById("btn-clear-filters");
-      if (btn) {
-        btn.addEventListener("click", () => {
-          state.prefs.filter = "all";
-          state.searchQuery = "";
-          els.searchInput.value = "";
-          saveJSON(STORAGE_KEYS.PREFS, state.prefs);
-          renderAll();
-        });
-      }
-      return;
-    }
 
-    const fragment = document.createDocumentFragment();
-
-    words.forEach((w, idx) => {
-      const prog = getProgress(w.key);
-      const isMastered = prog.status === "mastered";
-      const isReview = prog.status === "review";
-      const isNew = state.newWordKeys.has(w.key);
-      const isRevealed = !state.prefs.hideTranslation || state.revealedKeys.has(w.key);
-      const testRes = state.inlineTestResults[w.key];
-      const shadowRes = state.shadowResults[w.key];
-      const tipEnglish = extractEnglishFromTip(w.tip);
-
-      const card = document.createElement("article");
-      card.className = `word-card${isMastered ? " is-mastered" : ""}`;
-      card.dataset.key = w.key;
-
-      let translationHTML = "";
-      if (isRevealed) {
-        translationHTML = `
-          <div class="translation-text">
-            <span>${escapeHTML(w.translation)}</span>
+    const contextHTML =
+      w.sentence || w.tip
+        ? `
+        ${
+          !isCardMode
+            ? `<button type="button" class="list-context-toggle" data-action="toggle-list-context">${
+                showContext ? "▾ 收起原句与雅思例句" : "▸ 展开原句与雅思例句"
+              }</button>`
+            : ""
+        }
+        ${
+          showContext
+            ? `
+          <div class="context-section">
             ${
-              state.prefs.hideTranslation
-                ? `<button type="button" class="btn btn-ghost btn-sm" data-action="hide-one">重新隐藏</button>`
+              w.sentence
+                ? `
+              <div class="context-box context-box-source">
+                <div class="context-box-head">
+                  <span class="context-label-source">原书语境例句</span>
+                  <button type="button" class="btn-speak-mini" data-action="speak-sentence" title="朗读整句跟读（再点一次可停止）">
+                    ${ICONS.speaker}
+                    <span>朗读原句</span>
+                  </button>
+                </div>
+                <p class="context-text">${highlightTerm(w.sentence, w.word)}</p>
+              </div>
+            `
+                : ""
+            }
+            ${
+              w.tip
+                ? `
+              <div class="context-box context-box-ielts">
+                <div class="context-box-head">
+                  <span class="context-label-ielts">${escapeHTML(ielts.tag)}</span>
+                  ${
+                    ielts.speakable
+                      ? `
+                    <button type="button" class="btn-speak-mini btn-speak-mini-indigo" data-action="speak-ielts" title="朗读雅思仿写例句（再点一次可停止）">
+                      ${ICONS.speaker}
+                      <span>朗读例句</span>
+                    </button>
+                  `
+                      : ""
+                  }
+                </div>
+                <p class="context-text">${highlightTerm(ielts.body, w.word)}</p>
+              </div>
+            `
                 : ""
             }
           </div>
-        `;
-      } else {
-        const resultHTML = testRes
-          ? `
-            <div class="test-result ${testRes.isCorrect || testRes.overridden ? "correct" : "wrong"}">
-              <div class="test-result-head">
-                <span>${
-                  testRes.isCorrect
-                    ? "✓ 回答正确"
-                    : testRes.overridden
-                    ? "✓ 已标记为答对"
-                    : `✕ 有偏差（你输入：${escapeHTML(testRes.userInput)}）`
-                }</span>
-                <div class="controls-group">
-                  ${
-                    !testRes.isCorrect && !testRes.overridden
-                      ? `<button type="button" class="btn btn-sm" data-action="override-inline">意思相近，算我答对</button>`
-                      : ""
-                  }
-                  <button type="button" class="btn btn-ghost btn-sm" data-action="retry-inline">再测一次</button>
-                </div>
-              </div>
-              <div class="test-result-answer">参考翻译：${escapeHTML(w.translation)}</div>
-            </div>
-          `
-          : "";
-
-        translationHTML = `
-          <div class="translation-hidden-box">
-            <form class="inline-test-row" data-action="inline-test-form">
-              <input
-                type="text"
-                class="test-input"
-                name="answer"
-                placeholder="输入中文翻译自测（回车核对）…"
-                value="${testRes ? escapeHTML(testRes.userInput) : ""}"
-                autocomplete="off"
-              />
-              <button type="submit" class="btn btn-primary btn-sm">核对</button>
-              <button type="button" class="btn btn-sm" data-action="peek">偷看答案</button>
-            </form>
-            ${resultHTML}
-          </div>
-        `;
-      }
-
-      const shadowHTML = shadowRes
-        ? `
-          <div class="shadow-feedback ${
-            shadowRes.status === "done" ? (shadowRes.passed ? "pass" : "retry") : ""
-          }">
-            <span>${escapeHTML(shadowRes.message)}</span>
-            <button type="button" class="btn btn-ghost btn-sm" data-action="clear-shadow">关闭</button>
-          </div>
         `
+            : ""
+        }
+      `
         : "";
 
-      card.innerHTML = `
-        <div class="word-card-header">
-          <div class="word-head-left">
-            <span class="word-index">${String(idx + 1).padStart(2, "0")}</span>
-            <button type="button" class="word-term-btn" data-action="speak-word" title="点击发声">
+    return `
+      <article class="vocab-card" data-key="${escapeHTML(w.key)}">
+        <div class="vocab-card-header">
+          <div class="vocab-head-left">
+            <span class="index-badge">#${String(w.id).padStart(2, "0")}</span>
+            <button type="button" class="term-speak-btn" data-action="speak-word" title="点击发声（再点一次可停止）">
               <span>${escapeHTML(w.word)}</span>
+              ${ICONS.speaker}
             </button>
             ${isNew ? `<span class="badge-new">新增</span>` : ""}
           </div>
-          <div class="word-head-actions">
-            <button type="button" class="audio-btn" data-action="speak-word" title="朗读单词">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
-                <path d="M15.54 8.46a5 5 0 0 1 0 7.07"/>
-                <path d="M19.07 4.93a10 10 0 0 1 0 14.14"/>
-              </svg>
-              <span>发音</span>
-            </button>
-            <button type="button" class="audio-btn ${
+          <div class="vocab-head-right">
+            <button type="button" class="btn-mic ${
               shadowRes && shadowRes.status === "listening" ? "is-recording" : ""
-            }" data-action="shadow-word" title="点击跟读并检测发音">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/>
-                <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
-                <line x1="12" y1="19" x2="12" y2="22"/>
-              </svg>
-              <span>${shadowRes && shadowRes.status === "listening" ? "聆听中…" : "跟读"}</span>
+            }" data-action="shadow-word" title="点击语音跟读检测">
+              ${ICONS.mic}
+              <span>${shadowRes && shadowRes.status === "listening" ? "聆听中" : "跟读"}</span>
             </button>
-            <button type="button" class="status-btn ${isMastered ? "mastered" : isReview ? "review" : ""}" data-action="toggle-mastery" title="切换掌握状态">
-              ${isMastered ? "✓ 已掌握" : isReview ? "需复习" : "标记掌握"}
+            <button type="button" class="btn-master ${prog.mastered ? "is-mastered" : ""}" data-action="toggle-master">
+              ${ICONS.checkCircle}
+              <span>${prog.mastered ? "已掌握" : "标记掌握"}</span>
             </button>
           </div>
         </div>
 
         ${shadowHTML}
 
-        <div class="translation-section">
-          ${translationHTML}
+        <form class="test-form-row" data-action="check-form">
+          <input
+            type="text"
+            class="test-input"
+            name="answer"
+            value="${escapeHTML(userVal)}"
+            placeholder="输入该词在书中的中文释义，按回车或点击检查..."
+            autocomplete="off"
+          />
+          <button type="submit" class="btn-primary">检查</button>
+          <button type="button" class="btn-secondary" data-action="toggle-trans">
+            ${showTrans ? "隐藏译文" : "显示译文"}
+          </button>
+        </form>
+
+        ${feedbackHTML}
+
+        <div class="translation-box-wrap">
+          ${translationBlockHTML}
         </div>
 
-        ${
-          w.sentence || w.tip
-            ? `
-          <div class="context-block">
-            ${
-              w.sentence
-                ? `
-              <div class="sentence-line">
-                <div><span class="sentence-label">原句</span>${highlightSentence(w.sentence, w.word)}</div>
-                <button type="button" class="btn btn-ghost btn-sm" data-action="speak-sentence" title="朗读原句">读原句</button>
-              </div>
-            `
-                : ""
-            }
-            ${
-              w.tip
-                ? `
-              <div class="tip-line">
-                <div>${formatTipHTML(w.tip)}</div>
-                ${
-                  tipEnglish
-                    ? `<button type="button" class="btn btn-ghost btn-sm" data-action="speak-tip" title="朗读例句">读例句</button>`
-                    : ""
-                }
-              </div>
-            `
-                : ""
-            }
-          </div>
-        `
-            : ""
-        }
-      `;
-
-      fragment.appendChild(card);
-    });
-
-    els.listView.innerHTML = "";
-    els.listView.appendChild(fragment);
+        ${contextHTML}
+      </article>
+    `;
   }
 
-  // --- Rendering: Quiz View ---
-  function renderQuizView() {
+  // --- Render Views ---
+  function renderCardMode() {
     const words = getFilteredWords();
     if (words.length === 0) {
-      els.quizView.innerHTML = `
+      els.cardCounter.textContent = "第 0 / 0 题";
+      els.cardProgressFill.style.width = "0%";
+      els.cardModeSlot.innerHTML = `
         <div class="empty-state">
-          <p>当前筛选条件下没有可测试的单词。</p>
-          <button type="button" class="btn btn-sm" id="btn-quiz-clear-filters">查看全部单词</button>
+          <p>当前筛选或搜索条件下没有匹配的词汇。</p>
+          <button type="button" class="btn-secondary btn-sm" id="btn-clear-card-empty">显示全部词汇</button>
         </div>
       `;
-      const btn = document.getElementById("btn-quiz-clear-filters");
-      if (btn) {
-        btn.addEventListener("click", () => {
-          state.prefs.filter = "all";
-          state.searchQuery = "";
-          els.searchInput.value = "";
-          saveJSON(STORAGE_KEYS.PREFS, state.prefs);
-          renderAll();
-        });
-      }
+      els.cardBottomNav.style.display = "none";
+      const btn = document.getElementById("btn-clear-card-empty");
+      if (btn) btn.addEventListener("click", clearFilters);
       return;
     }
 
-    if (state.quizIndex >= words.length) state.quizIndex = 0;
-    if (state.quizIndex < 0) state.quizIndex = words.length - 1;
+    if (state.currentIndex >= words.length) state.currentIndex = words.length - 1;
+    if (state.currentIndex < 0) state.currentIndex = 0;
 
-    const w = words[state.quizIndex];
-    const prog = getProgress(w.key);
-    const ans = state.quizAnswerState;
-    const shadowRes = state.shadowResults[w.key];
-    const tipEnglish = extractEnglishFromTip(w.tip);
+    const current = words[state.currentIndex];
+    els.cardCounter.textContent = `第 ${state.currentIndex + 1} / ${words.length} 题`;
+    els.cardProgressFill.style.width = `${Math.round(((state.currentIndex + 1) / words.length) * 100)}%`;
+    els.cardModeSlot.innerHTML = buildVocabCardHTML(current, true);
 
-    const shadowHTML = shadowRes
-      ? `
-        <div class="shadow-feedback ${
-          shadowRes.status === "done" ? (shadowRes.passed ? "pass" : "retry") : ""
-        }" style="margin-top: 14px; text-align: left;">
-          <span>${escapeHTML(shadowRes.message)}</span>
-          <button type="button" class="btn btn-ghost btn-sm" data-quiz-action="clear-shadow">关闭</button>
-        </div>
-      `
-      : "";
+    els.cardBottomNav.style.display = "flex";
+    els.btnPrevCard.disabled = state.currentIndex === 0;
+    els.btnNextCard.disabled = state.currentIndex >= words.length - 1;
+  }
 
-    let answerSectionHTML = "";
-    if (!ans) {
-      answerSectionHTML = `
-        <form class="quiz-input-form" id="quiz-answer-form">
-          <input
-            type="text"
-            id="quiz-answer-input"
-            class="quiz-input"
-            placeholder="输入中文翻译，按 Enter 核对…"
-            autocomplete="off"
-          />
-          <div class="quiz-actions">
-            <button type="button" class="btn btn-ghost btn-sm" data-quiz-action="skip">不会 / 直接看答案</button>
-            <button type="submit" class="btn btn-primary">核对答案 <span class="kbd-hint" style="background: rgba(255,255,255,0.2); border-color: transparent; color: #fff;">Enter</span></button>
-          </div>
-        </form>
-      `;
-    } else {
-      const isOk = ans.isCorrect || ans.overridden;
-      answerSectionHTML = `
-        <div class="test-result ${isOk ? "correct" : "wrong"}" style="margin-top: 18px;">
-          <div class="test-result-head">
-            <span>${
-              ans.skipped
-                ? "已显示参考翻译（已加入需复习）"
-                : ans.isCorrect
-                ? "✓ 回答正确！"
-                : ans.overridden
-                ? "✓ 已手动判定为答对"
-                : `✕ 有偏差（你输入：${escapeHTML(ans.userInput)}）`
-            }</span>
-            ${
-              !isOk && !ans.skipped
-                ? `<button type="button" class="btn btn-sm" data-quiz-action="override">意思相近，算我答对</button>`
-                : ""
-            }
-          </div>
-          <div class="test-result-answer">参考翻译：${escapeHTML(w.translation)}</div>
-        </div>
-
-        ${
-          w.sentence || w.tip
-            ? `
-          <div class="context-block" style="margin-top: 16px;">
-            ${
-              w.sentence
-                ? `
-              <div class="sentence-line">
-                <div><span class="sentence-label">原句</span>${highlightSentence(w.sentence, w.word)}</div>
-                <button type="button" class="btn btn-ghost btn-sm" data-quiz-action="speak-sentence">读原句</button>
-              </div>
-            `
-                : ""
-            }
-            ${
-              w.tip
-                ? `
-              <div class="tip-line">
-                <div>${formatTipHTML(w.tip)}</div>
-                ${
-                  tipEnglish
-                    ? `<button type="button" class="btn btn-ghost btn-sm" data-quiz-action="speak-tip">读例句</button>`
-                    : ""
-                }
-              </div>
-            `
-                : ""
-            }
-          </div>
-        `
-            : ""
-        }
-
-        <div class="quiz-actions" style="margin-top: 18px;">
-          <button type="button" class="status-btn ${
-            prog.status === "mastered" ? "mastered" : ""
-          }" data-quiz-action="toggle-mastery">
-            ${prog.status === "mastered" ? "✓ 已掌握" : "标记为已掌握"}
-          </button>
-          <button type="button" class="btn btn-primary" id="btn-quiz-next-main" data-quiz-action="next">
-            下一个词 <span class="kbd-hint" style="background: rgba(255,255,255,0.2); border-color: transparent; color: #fff;">Enter</span>
-          </button>
+  function renderListMode() {
+    const words = getFilteredWords();
+    if (words.length === 0) {
+      els.listModeSection.innerHTML = `
+        <div class="empty-state">
+          <p>当前筛选或搜索条件下没有匹配的词汇。</p>
+          <button type="button" class="btn-secondary btn-sm" id="btn-clear-list-empty">显示全部词汇</button>
         </div>
       `;
+      const btn = document.getElementById("btn-clear-list-empty");
+      if (btn) btn.addEventListener("click", clearFilters);
+      return;
     }
 
-    els.quizView.innerHTML = `
-      <div class="quiz-card">
-        <div class="quiz-meta">
-          <span>第 <strong>${state.quizIndex + 1}</strong> / ${words.length} 词${
-            state.newWordKeys.has(w.key) ? ' <span class="badge-new">新增</span>' : ""
-          }</span>
-          <span>本次自测正确：${state.quizSessionStats.right} / ${state.quizSessionStats.total}</span>
-        </div>
+    els.listModeSection.innerHTML = words.map((w) => buildVocabCardHTML(w, false)).join("");
+  }
 
-        <div class="quiz-word-area">
-          <button type="button" class="quiz-word-btn" data-quiz-action="speak-word" title="点击发声">
-            ${escapeHTML(w.word)}
-          </button>
-          <div class="quiz-audio-bar">
-            <button type="button" class="audio-btn" data-quiz-action="speak-word">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
-                <path d="M15.54 8.46a5 5 0 0 1 0 7.07"/>
-              </svg>
-              <span>听发音</span>
-            </button>
-            <button type="button" class="audio-btn ${
-              shadowRes && shadowRes.status === "listening" ? "is-recording" : ""
-            }" data-quiz-action="shadow-word">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/>
-                <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
-                <line x1="12" y1="19" x2="12" y2="22"/>
-              </svg>
-              <span>${shadowRes && shadowRes.status === "listening" ? "聆听中…" : "跟读检测"}</span>
-            </button>
-            ${
-              w.sentence && !ans
-                ? `<button type="button" class="audio-btn" data-quiz-action="toggle-hint">${
-                    state.quizShowHint ? "隐藏原句提示" : "看原句提示"
-                  }</button>`
-                : ""
-            }
-          </div>
-          ${shadowHTML}
-          ${
-            w.sentence && state.quizShowHint && !ans
-              ? `<div class="quiz-hint-sentence">${highlightSentence(w.sentence, w.word)}</div>`
-              : ""
-          }
-        </div>
-
-        ${answerSectionHTML}
-
-        <div class="quiz-nav">
-          <button type="button" class="btn btn-sm" data-quiz-action="prev">← 上一个</button>
-          <span style="font-size: 0.78rem; color: var(--ink-muted);">点击英文可重复发音</span>
-          <button type="button" class="btn btn-sm" data-quiz-action="next">下一个 →</button>
-        </div>
-      </div>
-    `;
-
-    // Autofocus input when awaiting answer
-    const input = document.getElementById("quiz-answer-input");
-    if (input) {
-      input.focus();
-    }
+  function clearFilters() {
+    state.prefs.filter = "all";
+    state.searchQuery = "";
+    els.searchInput.value = "";
+    state.currentIndex = 0;
+    saveJSON(STORAGE_KEYS.PREFS, state.prefs);
+    renderAll();
   }
 
   function renderCurrentView() {
-    if (state.prefs.mode === "list") {
-      els.listView.hidden = false;
-      els.quizView.hidden = true;
-      els.hideTransLabel.style.display = "inline-flex";
-      renderListView();
+    if (state.prefs.viewMode === "card") {
+      els.cardModeSection.hidden = false;
+      els.listModeSection.hidden = true;
+      renderCardMode();
     } else {
-      els.listView.hidden = true;
-      els.quizView.hidden = false;
-      els.hideTransLabel.style.display = "none";
-      renderQuizView();
+      els.cardModeSection.hidden = true;
+      els.listModeSection.hidden = false;
+      renderListMode();
     }
   }
 
-  function renderAll() {
-    els.title.textContent = state.title || "单词记忆本";
-    document.title = `${state.title || "单词记忆本"} · 记忆网页`;
-    els.linkSourceSheet.href = state.config.url;
+  function updateToolbarControls() {
+    // View mode buttons
+    const isCard = state.prefs.viewMode === "card";
+    els.btnModeCard.classList.toggle("active", isCard);
+    els.btnModeCard.setAttribute("aria-selected", String(isCard));
+    els.btnModeList.classList.toggle("active", !isCard);
+    els.btnModeList.setAttribute("aria-selected", String(!isCard));
 
-    // Mode tabs
-    els.tabList.classList.toggle("active", state.prefs.mode === "list");
-    els.tabList.setAttribute("aria-selected", String(state.prefs.mode === "list"));
-    els.tabQuiz.classList.toggle("active", state.prefs.mode === "quiz");
-    els.tabQuiz.setAttribute("aria-selected", String(state.prefs.mode === "quiz"));
+    // Global translation toggle
+    const hidden = state.prefs.globalHideTranslation;
+    els.btnGlobalTrans.classList.toggle("is-shown", !hidden);
+    els.iconGlobalEye.innerHTML = hidden ? ICONS.eyeOff : ICONS.eyeOn;
+    els.textGlobalTrans.textContent = hidden
+      ? "翻译已隐藏 (点击显示全部)"
+      : "翻译已显示 (点击全部隐藏)";
 
-    // Controls
-    els.toggleHideTrans.checked = state.prefs.hideTranslation;
+    // Accent & rate
     els.btnAccentUS.classList.toggle("active", state.prefs.accent === "en-US");
     els.btnAccentUK.classList.toggle("active", state.prefs.accent === "en-GB");
-    els.btnSpeedToggle.textContent = state.prefs.rate < 1 ? "慢速 0.75x" : "语速 1.0x";
+    els.btnRateNormal.classList.toggle("active", state.prefs.rate >= 1.0);
+    els.btnRateSlow.classList.toggle("active", state.prefs.rate < 1.0);
 
-    // Filter pills
-    els.filterPills.querySelectorAll(".filter-pill").forEach((pill) => {
-      pill.classList.toggle("active", pill.dataset.filter === state.prefs.filter);
-    });
+    // Order
+    const isShuffled = Boolean(state.shuffledOrder);
+    els.btnOrderShuffle.classList.toggle("active", isShuffled);
+    els.btnOrderDefault.classList.toggle("active", !isShuffled);
+  }
 
-    updateCountsAndProgress();
+  function renderAll() {
+    els.title.textContent = state.title;
+    document.title = state.title;
+    els.linkSourceSheet.href = state.config.url;
+    updateHeaderStats();
+    updateToolbarControls();
     renderCurrentView();
   }
 
-  // --- Event Listeners ---
-  function bindEvents() {
-    // Sync now
-    els.btnSyncNow.addEventListener("click", () => syncFromGoogleSheet(true));
+  // --- Shared Card Action Handler ---
+  function handleCardClick(e) {
+    const actionEl = e.target.closest("[data-action]");
+    if (!actionEl) return;
+    const card = actionEl.closest(".vocab-card");
+    if (!card) return;
+    const key = card.dataset.key;
+    const w = state.words.find((item) => item.key === key);
+    if (!w) return;
 
-    // Update banner buttons
+    const action = actionEl.dataset.action;
+    if (action === "speak-word") {
+      speakText(w.word, actionEl, "朗读词汇");
+    } else if (action === "speak-sentence") {
+      speakText(w.sentence, actionEl, "朗读原句");
+    } else if (action === "speak-ielts") {
+      const ielts = parseIeltsTip(w.tip);
+      speakText(ielts.speakable, actionEl, "朗读例句");
+    } else if (action === "shadow-word") {
+      startShadowing(w);
+    } else if (action === "toggle-master") {
+      toggleMastered(key);
+    } else if (action === "toggle-trans") {
+      state.itemRevealOverrides[key] = !isTranslationVisible(key);
+      renderCurrentView();
+    } else if (action === "override-check") {
+      const res = state.itemCheckResults[key];
+      if (res && !res.isCorrect && !res.overridden) {
+        res.overridden = true;
+        state.progress.correctCount = (state.progress.correctCount || 0) + 1;
+        const cur = getItemProgress(key);
+        state.progress.items[key] = { ...cur, review: false };
+        saveProgress();
+        updateHeaderStats();
+        renderCurrentView();
+      }
+    } else if (action === "toggle-list-context") {
+      state.itemExpandedListContext[key] = !state.itemExpandedListContext[key];
+      renderCurrentView();
+    } else if (action === "clear-shadow") {
+      delete state.shadowResults[key];
+      renderCurrentView();
+    }
+  }
+
+  function handleCardInput(e) {
+    if (!e.target.classList.contains("test-input")) return;
+    const card = e.target.closest(".vocab-card");
+    if (!card) return;
+    state.itemInputs[card.dataset.key] = e.target.value;
+  }
+
+  function handleCardSubmit(e) {
+    const form = e.target.closest('[data-action="check-form"]');
+    if (!form) return;
+    e.preventDefault();
+    const card = form.closest(".vocab-card");
+    if (!card) return;
+    const key = card.dataset.key;
+    const w = state.words.find((item) => item.key === key);
+    if (!w) return;
+
+    const input = form.querySelector('input[name="answer"]');
+    const userInput = (input ? input.value : "").trim();
+    if (!userInput) {
+      showToast("请先输入你的中文释义");
+      if (input) input.focus();
+      return;
+    }
+
+    state.itemInputs[key] = userInput;
+    const isCorrect = checkTranslation(userInput, w.translation);
+    state.itemCheckResults[key] = { isCorrect, userInput, overridden: false };
+    // Auto-reveal translation after checking so user can compare immediately
+    state.itemRevealOverrides[key] = true;
+
+    state.progress.testedCount = (state.progress.testedCount || 0) + 1;
+    if (isCorrect) {
+      state.progress.correctCount = (state.progress.correctCount || 0) + 1;
+    } else {
+      const cur = getItemProgress(key);
+      state.progress.items[key] = { ...cur, review: true };
+    }
+    saveProgress();
+    updateHeaderStats();
+    renderCurrentView();
+  }
+
+  // --- Event Binding ---
+  function bindEvents() {
+    els.syncPill.addEventListener("click", () => syncFromGoogleSheet(true));
+
     els.btnDismissBanner.addEventListener("click", () => {
       els.updateBanner.hidden = true;
     });
     els.btnViewNewWords.addEventListener("click", () => {
       state.prefs.filter = "new";
-      saveJSON(STORAGE_KEYS.PREFS, state.prefs);
+      state.currentIndex = 0;
       els.updateBanner.hidden = true;
-      state.quizIndex = 0;
-      state.quizAnswerState = null;
-      renderAll();
-    });
-
-    // Mode switcher
-    els.tabList.addEventListener("click", () => {
-      state.prefs.mode = "list";
-      saveJSON(STORAGE_KEYS.PREFS, state.prefs);
-      renderAll();
-    });
-    els.tabQuiz.addEventListener("click", () => {
-      state.prefs.mode = "quiz";
-      state.quizAnswerState = null;
-      state.quizShowHint = false;
       saveJSON(STORAGE_KEYS.PREFS, state.prefs);
       renderAll();
     });
 
-    // Hide translation toggle
-    els.toggleHideTrans.addEventListener("change", (e) => {
-      state.prefs.hideTranslation = e.target.checked;
-      state.revealedKeys.clear();
+    // View mode
+    els.btnModeCard.addEventListener("click", () => {
+      state.prefs.viewMode = "card";
       saveJSON(STORAGE_KEYS.PREFS, state.prefs);
+      renderAll();
+    });
+    els.btnModeList.addEventListener("click", () => {
+      state.prefs.viewMode = "list";
+      saveJSON(STORAGE_KEYS.PREFS, state.prefs);
+      renderAll();
+    });
+
+    // Global translation toggle
+    els.btnGlobalTrans.addEventListener("click", () => {
+      state.prefs.globalHideTranslation = !state.prefs.globalHideTranslation;
+      state.itemRevealOverrides = {};
+      saveJSON(STORAGE_KEYS.PREFS, state.prefs);
+      updateToolbarControls();
       renderCurrentView();
     });
 
-    // Accent toggle
+    // Accent
     els.btnAccentUS.addEventListener("click", () => {
       state.prefs.accent = "en-US";
       saveJSON(STORAGE_KEYS.PREFS, state.prefs);
-      renderAll();
+      updateToolbarControls();
       showToast("已切换为美式发音 (US)");
     });
     els.btnAccentUK.addEventListener("click", () => {
       state.prefs.accent = "en-GB";
       saveJSON(STORAGE_KEYS.PREFS, state.prefs);
-      renderAll();
+      updateToolbarControls();
       showToast("已切换为英式发音 (UK)");
     });
 
-    // Speed toggle
-    els.btnSpeedToggle.addEventListener("click", () => {
-      state.prefs.rate = state.prefs.rate < 1 ? 1.0 : 0.75;
+    // Speed
+    els.btnRateNormal.addEventListener("click", () => {
+      state.prefs.rate = 1.0;
       saveJSON(STORAGE_KEYS.PREFS, state.prefs);
-      renderAll();
-      showToast(state.prefs.rate < 1 ? "已切换慢速 0.75x（适合跟读）" : "已切换正常语速 1.0x");
+      updateToolbarControls();
+      showToast("语速已设为正常 1.0x");
+    });
+    els.btnRateSlow.addEventListener("click", () => {
+      state.prefs.rate = 0.7;
+      saveJSON(STORAGE_KEYS.PREFS, state.prefs);
+      updateToolbarControls();
+      showToast("语速已设为慢速 0.7x（适合跟读）");
     });
 
-    // Filter pills
-    els.filterPills.addEventListener("click", (e) => {
-      const pill = e.target.closest(".filter-pill");
-      if (!pill) return;
-      state.prefs.filter = pill.dataset.filter;
-      state.quizIndex = 0;
-      state.quizAnswerState = null;
-      state.quizShowHint = false;
+    // Filter select
+    els.filterSelect.addEventListener("change", (e) => {
+      state.prefs.filter = e.target.value;
+      state.currentIndex = 0;
       saveJSON(STORAGE_KEYS.PREFS, state.prefs);
-      renderAll();
-    });
-
-    // Search
-    els.searchInput.addEventListener("input", (e) => {
-      state.searchQuery = e.target.value;
-      state.quizIndex = 0;
-      state.quizAnswerState = null;
       renderCurrentView();
     });
 
-    // Shuffle
-    els.btnShuffle.addEventListener("click", () => {
+    // Order buttons
+    els.btnOrderShuffle.addEventListener("click", () => {
       const keys = state.words.map((w) => w.key);
       for (let i = keys.length - 1; i > 0; i--) {
         const j = Math.floor(Math.random() * (i + 1));
         [keys[i], keys[j]] = [keys[j], keys[i]];
       }
-      state.orderSeed = keys;
-      state.quizIndex = 0;
-      state.quizAnswerState = null;
-      state.quizShowHint = false;
+      state.shuffledOrder = keys;
+      state.currentIndex = 0;
+      updateToolbarControls();
       renderCurrentView();
-      showToast("已随机打乱单词顺序");
+      showToast("已随机打乱词汇顺序");
+    });
+    els.btnOrderDefault.addEventListener("click", () => {
+      state.shuffledOrder = null;
+      state.currentIndex = 0;
+      updateToolbarControls();
+      renderCurrentView();
+      showToast("已恢复表格原序");
     });
 
-    // List View Delegation
-    els.listView.addEventListener("click", (e) => {
-      const actionEl = e.target.closest("[data-action]");
-      if (!actionEl) return;
-      const card = actionEl.closest(".word-card");
-      if (!card) return;
-      const key = card.dataset.key;
-      const wordObj = state.words.find((w) => w.key === key);
-      if (!wordObj) return;
-
-      const action = actionEl.dataset.action;
-      if (action === "speak-word") {
-        speakText(wordObj.word, actionEl);
-      } else if (action === "speak-sentence") {
-        speakText(wordObj.sentence, actionEl);
-      } else if (action === "speak-tip") {
-        speakText(extractEnglishFromTip(wordObj.tip), actionEl);
-      } else if (action === "shadow-word") {
-        startShadowing(wordObj, actionEl);
-      } else if (action === "toggle-mastery") {
-        const cur = getProgress(key).status;
-        setWordStatus(key, cur === "mastered" ? "none" : "mastered");
-        renderCurrentView();
-      } else if (action === "peek") {
-        state.revealedKeys.add(key);
-        renderCurrentView();
-      } else if (action === "hide-one") {
-        state.revealedKeys.delete(key);
-        renderCurrentView();
-      } else if (action === "override-inline") {
-        if (state.inlineTestResults[key]) {
-          state.inlineTestResults[key].overridden = true;
-          setWordStatus(key, "none");
-          renderCurrentView();
-        }
-      } else if (action === "retry-inline") {
-        delete state.inlineTestResults[key];
-        renderCurrentView();
-      } else if (action === "clear-shadow") {
-        delete state.shadowResults[key];
-        renderCurrentView();
-      }
-    });
-
-    els.listView.addEventListener("submit", (e) => {
-      const form = e.target.closest('[data-action="inline-test-form"]');
-      if (!form) return;
-      e.preventDefault();
-      const card = form.closest(".word-card");
-      const key = card && card.dataset.key;
-      const wordObj = state.words.find((w) => w.key === key);
-      if (!wordObj) return;
-
-      const input = form.querySelector('input[name="answer"]');
-      const userInput = (input ? input.value : "").trim();
-      if (!userInput) {
-        showToast("请先输入你的中文翻译");
-        if (input) input.focus();
-        return;
-      }
-
-      const isCorrect = checkTranslation(userInput, wordObj.translation);
-      state.inlineTestResults[key] = { userInput, isCorrect, overridden: false };
-      recordTestAttempt(key, isCorrect);
+    // Search
+    els.searchInput.addEventListener("input", (e) => {
+      state.searchQuery = e.target.value;
+      state.currentIndex = 0;
       renderCurrentView();
     });
 
-    // Quiz View Delegation
-    els.quizView.addEventListener("click", (e) => {
-      const actionEl = e.target.closest("[data-quiz-action]");
-      if (!actionEl) return;
-      const words = getFilteredWords();
-      if (words.length === 0) return;
-      const w = words[state.quizIndex] || words[0];
-      const action = actionEl.dataset.quizAction;
-
-      if (action === "speak-word") {
-        speakText(w.word, actionEl);
-      } else if (action === "speak-sentence") {
-        speakText(w.sentence, actionEl);
-      } else if (action === "speak-tip") {
-        speakText(extractEnglishFromTip(w.tip), actionEl);
-      } else if (action === "shadow-word") {
-        startShadowing(w, actionEl);
-      } else if (action === "toggle-hint") {
-        state.quizShowHint = !state.quizShowHint;
-        renderQuizView();
-      } else if (action === "skip") {
-        state.quizAnswerState = { userInput: "", isCorrect: false, skipped: true, overridden: false };
-        state.quizSessionStats.total++;
-        recordTestAttempt(w.key, false);
-        renderQuizView();
-      } else if (action === "override") {
-        if (state.quizAnswerState && !state.quizAnswerState.overridden) {
-          state.quizAnswerState.overridden = true;
-          state.quizSessionStats.right++;
-          setWordStatus(w.key, "none");
-          renderQuizView();
-        }
-      } else if (action === "toggle-mastery") {
-        const cur = getProgress(w.key).status;
-        setWordStatus(w.key, cur === "mastered" ? "none" : "mastered");
-        renderQuizView();
-      } else if (action === "next") {
-        state.quizIndex = (state.quizIndex + 1) % words.length;
-        state.quizAnswerState = null;
-        state.quizShowHint = false;
-        renderQuizView();
-      } else if (action === "prev") {
-        state.quizIndex = (state.quizIndex - 1 + words.length) % words.length;
-        state.quizAnswerState = null;
-        state.quizShowHint = false;
-        renderQuizView();
-      } else if (action === "clear-shadow") {
-        delete state.shadowResults[w.key];
-        renderQuizView();
+    // Card mode bottom nav
+    els.btnPrevCard.addEventListener("click", () => {
+      if (state.currentIndex > 0) {
+        stopSpeaking(true);
+        state.currentIndex--;
+        renderCardMode();
       }
     });
-
-    els.quizView.addEventListener("submit", (e) => {
-      if (e.target.id !== "quiz-answer-form") return;
-      e.preventDefault();
+    els.btnNextCard.addEventListener("click", () => {
       const words = getFilteredWords();
-      if (words.length === 0) return;
-      const w = words[state.quizIndex] || words[0];
-      const input = document.getElementById("quiz-answer-input");
-      const userInput = (input ? input.value : "").trim();
-      if (!userInput) {
-        showToast("请输入中文翻译，或点击「不会 / 直接看答案」");
-        if (input) input.focus();
-        return;
+      if (state.currentIndex < words.length - 1) {
+        stopSpeaking(true);
+        state.currentIndex++;
+        renderCardMode();
       }
-
-      const isCorrect = checkTranslation(userInput, w.translation);
-      state.quizAnswerState = { userInput, isCorrect, skipped: false, overridden: false };
-      state.quizSessionStats.total++;
-      if (isCorrect) state.quizSessionStats.right++;
-      recordTestAttempt(w.key, isCorrect);
-      renderQuizView();
+    });
+    els.btnSpeakCurrent.addEventListener("click", () => {
+      const words = getFilteredWords();
+      const w = words[state.currentIndex];
+      if (w) speakText(w.word, els.btnSpeakCurrent, "跟读发音");
     });
 
-    // Enter key to advance to next card in Quiz Mode after answering
+    // Delegate card actions in both Card Mode & List Mode
+    [els.cardModeSlot, els.listModeSection].forEach((container) => {
+      container.addEventListener("click", handleCardClick);
+      container.addEventListener("input", handleCardInput);
+      container.addEventListener("submit", handleCardSubmit);
+    });
+
+    // Keyboard shortcuts in Card Mode
     document.addEventListener("keydown", (e) => {
-      if (state.prefs.mode !== "quiz") return;
+      if (state.prefs.viewMode !== "card") return;
       if (!els.settingsModal.hidden) return;
-      if (e.key === "Enter" && state.quizAnswerState) {
-        const activeTag = document.activeElement && document.activeElement.tagName;
-        if (activeTag === "INPUT" || activeTag === "TEXTAREA") return;
+      const tag = document.activeElement && document.activeElement.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+
+      const words = getFilteredWords();
+      if (words.length === 0) return;
+      const w = words[state.currentIndex];
+
+      if (e.code === "Space") {
         e.preventDefault();
-        const words = getFilteredWords();
-        if (words.length > 0) {
-          state.quizIndex = (state.quizIndex + 1) % words.length;
-          state.quizAnswerState = null;
-          state.quizShowHint = false;
-          renderQuizView();
+        if (w) speakText(w.word, null, "朗读词汇");
+      } else if (e.key === "s" || e.key === "S") {
+        e.preventDefault();
+        if (w && w.sentence) speakText(w.sentence, null, "朗读原句");
+      } else if (e.key === "ArrowLeft") {
+        if (state.currentIndex > 0) {
+          stopSpeaking(true);
+          state.currentIndex--;
+          renderCardMode();
+        }
+      } else if (e.key === "ArrowRight") {
+        if (state.currentIndex < words.length - 1) {
+          stopSpeaking(true);
+          state.currentIndex++;
+          renderCardMode();
         }
       }
     });
 
-    // Settings modal
+    // Footer reset progress
+    els.btnResetFooter.addEventListener("click", () => {
+      if (!window.confirm("确定要清空所有本地「已掌握 / 错题 / 自测统计」记录吗？单词库不会被删除。")) {
+        return;
+      }
+      state.progress = { items: {}, testedCount: 0, correctCount: 0 };
+      state.itemCheckResults = {};
+      state.itemInputs = {};
+      saveProgress();
+      renderAll();
+      showToast("本地学习与测试记录已清空");
+    });
+
+    // Settings Modal
     els.btnOpenSettings.addEventListener("click", () => {
       els.inputSheetUrl.value = state.config.url;
       els.settingsSyncMeta.textContent = state.lastSyncAt
@@ -1520,7 +1498,6 @@
         : "尚未完成同步";
       els.settingsModal.hidden = false;
     });
-
     const closeSettings = () => {
       els.settingsModal.hidden = true;
     };
@@ -1538,30 +1515,13 @@
         showToast("请输入有效的 Google 表格链接");
         return;
       }
-      state.config = {
-        sheetId: parsed.sheetId,
-        gid: parsed.gid,
-        url: rawUrl,
-      };
+      state.config = { sheetId: parsed.sheetId, gid: parsed.gid, url: rawUrl };
       saveJSON(STORAGE_KEYS.CONFIG, state.config);
       closeSettings();
       syncFromGoogleSheet(true);
     });
 
-    els.btnResetProgress.addEventListener("click", () => {
-      if (!window.confirm("确定要清空所有「已掌握 / 需复习」学习记录吗？单词库本身不会被删除。")) {
-        return;
-      }
-      state.progress = {};
-      state.inlineTestResults = {};
-      state.quizSessionStats = { right: 0, total: 0 };
-      saveJSON(STORAGE_KEYS.PROGRESS, state.progress);
-      closeSettings();
-      renderAll();
-      showToast("学习记录已重置");
-    });
-
-    // Auto-check for updates when user returns to this tab after > 90 seconds
+    // Re-check Google Sheet when switching back to tab after > 90s
     document.addEventListener("visibilitychange", () => {
       if (document.visibilityState === "visible" && Date.now() - lastAutoCheckTs > 90_000) {
         syncFromGoogleSheet(false);
@@ -1571,7 +1531,6 @@
 
   // --- Bootstrap ---
   function init() {
-    // 1. Load cached words (or built-in fallback snapshot) for instant first paint
     const cached = loadJSON(STORAGE_KEYS.CACHE, null);
     if (
       cached &&
@@ -1583,7 +1542,8 @@
       if (cached.title) state.title = cached.title;
       state.lastSyncAt = cached.syncedAt || null;
     } else if (Array.isArray(window.FALLBACK_WORDS) && window.FALLBACK_WORDS.length > 0) {
-      state.words = window.FALLBACK_WORDS.map((w) => ({
+      state.words = window.FALLBACK_WORDS.map((w, idx) => ({
+        id: idx + 1,
         key: wordKey(w.word),
         word: w.word,
         translation: w.translation,
@@ -1592,15 +1552,15 @@
       }));
     }
 
-    // Preload speech synthesis voices
+    loadVoices();
     if ("speechSynthesis" in window) {
-      window.speechSynthesis.getVoices();
+      window.speechSynthesis.onvoiceschanged = loadVoices;
     }
 
     bindEvents();
     renderAll();
 
-    // 2. Automatically detect updates from Google Sheet on every page open
+    // Automatically detect Google Sheet updates on every page open
     syncFromGoogleSheet(false);
   }
 
