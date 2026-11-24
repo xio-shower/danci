@@ -1037,11 +1037,32 @@ kbd {
   height: 13px;
 }
 
+.context-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
 .context-text {
   margin: 0;
   font-size: 0.875rem;
   color: var(--ink-secondary);
   line-height: 1.65;
+}
+
+.sentence-trans {
+  margin: 8px 0 0;
+  padding-top: 8px;
+  border-top: 1px dashed rgba(148, 163, 184, 0.35);
+  font-size: 0.8125rem;
+  color: var(--ink-muted);
+  line-height: 1.6;
+}
+
+.sentence-trans-loading {
+  color: var(--ink-faint);
+  font-style: italic;
 }
 
 mark.term-mark {

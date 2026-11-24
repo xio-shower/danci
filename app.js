@@ -11,6 +11,7 @@
     PREFS: "danci_user_prefs_v2",
     TTS_CONFIG: "danci_tts_config_v1",
     DAILY_SESSION: "danci_daily_session_v1",
+    SENTENCE_TRANS_CACHE: "danci_sentence_trans_cache_v1",
   };
 
   // --- SVG Icons ---
@@ -61,10 +62,15 @@
     lastSyncSummary: "",
     // Daily remembered UI states (persisted for today, auto-reset next day)
     itemRevealOverrides: {}, // { [key]: boolean }
+    sentenceRevealOverrides: {}, // { [`${key}:src`|`${key}:ielts`]: boolean }
     itemInputs: {}, // { [key]: string }
     itemCheckResults: {}, // { [key]: { isCorrect, userInput, overridden } }
     itemExpandedListContext: {}, // { [key]: boolean }
     shadowResults: {}, // { [key]: { status, message, passed } }
+    sentenceTransCache: {
+      ...(window.SENTENCE_TRANSLATIONS || {}),
+      ...loadJSON(STORAGE_KEYS.SENTENCE_TRANS_CACHE, {}),
+    },
   };
 
   // --- TTS Session State ---
@@ -79,6 +85,7 @@
   };
 
   const openaiAudioCache = new Map();
+  const pendingSentenceTrans = new Set();
   let availableVoices = [];
   let activeRecognition = null;
   let toastTimer = null;
@@ -236,7 +243,69 @@
     if (exMatch) speakable = exMatch[1];
     speakable = speakable.replace(/[（(]注[：:][^）)]*[）)]/g, "").trim();
     const enCount = (speakable.match(/[A-Za-z]/g) || []).length;
-    return { tag, body, speakable: enCount >= 12 ? speakable : "" };
+    const zhCount = (speakable.match(/[\u4e00-\u9fff]/g) || []).length;
+    return { tag, body, speakable: enCount >= 12 && enCount > zhCount * 2 ? speakable : "" };
+  }
+
+  // --- Sentence Translation (Built-in + Local Cache + Online Auto-Translate) ---
+  function getSentenceTranslation(enText) {
+    const clean = String(enText || "").trim();
+    if (!clean) return "";
+    return state.sentenceTransCache[clean] || null;
+  }
+
+  async function fetchSentenceTranslation(enText) {
+    const clean = String(enText || "").trim();
+    if (!clean || state.sentenceTransCache[clean] || pendingSentenceTrans.has(clean)) return;
+    pendingSentenceTrans.add(clean);
+
+    let translated = "";
+    try {
+      // Primary: Google Translate public endpoint
+      const gUrl = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=zh-CN&dt=t&q=${encodeURIComponent(
+        clean
+      )}`;
+      const res = await fetch(gUrl);
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data) && Array.isArray(data[0])) {
+          translated = data[0].map((seg) => (Array.isArray(seg) ? seg[0] : "")).join("").trim();
+        }
+      }
+    } catch {
+      // Fallback below
+    }
+
+    if (!translated) {
+      try {
+        // Fallback: MyMemory public CORS API
+        const mUrl = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(
+          clean
+        )}&langpair=en|zh-CN`;
+        const res = await fetch(mUrl);
+        if (res.ok) {
+          const data = await res.json();
+          if (data && data.responseData && data.responseData.translatedText) {
+            translated = String(data.responseData.translatedText).trim();
+          }
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    pendingSentenceTrans.delete(clean);
+    if (translated) {
+      state.sentenceTransCache[clean] = translated;
+      const customCache = loadJSON(STORAGE_KEYS.SENTENCE_TRANS_CACHE, {});
+      customCache[clean] = translated;
+      saveJSON(STORAGE_KEYS.SENTENCE_TRANS_CACHE, customCache);
+      renderCurrentView();
+    } else {
+      state.sentenceTransCache[clean] = "（暂未能自动获取译文，请检查网络后重试）";
+      renderCurrentView();
+      delete state.sentenceTransCache[clean];
+    }
   }
 
   // --- Smart Chinese Translation Matcher ---
@@ -1119,6 +1188,7 @@
       itemInputs: state.itemInputs,
       itemCheckResults: state.itemCheckResults,
       itemRevealOverrides: state.itemRevealOverrides,
+      sentenceRevealOverrides: state.sentenceRevealOverrides,
     });
   }
 
@@ -1148,6 +1218,10 @@
         saved.itemRevealOverrides && typeof saved.itemRevealOverrides === "object"
           ? saved.itemRevealOverrides
           : {};
+      state.sentenceRevealOverrides =
+        saved.sentenceRevealOverrides && typeof saved.sentenceRevealOverrides === "object"
+          ? saved.sentenceRevealOverrides
+          : {};
       restorePositionFromKey();
       return false;
     }
@@ -1161,6 +1235,7 @@
     state.itemInputs = {};
     state.itemCheckResults = {};
     state.itemRevealOverrides = {};
+    state.sentenceRevealOverrides = {};
     state.orderMode = prevMode;
 
     if (prevMode === "weighted" && state.words.length > 0) {
@@ -1202,6 +1277,14 @@
   function isTranslationVisible(key) {
     if (key in state.itemRevealOverrides) {
       return Boolean(state.itemRevealOverrides[key]);
+    }
+    return !state.prefs.globalHideTranslation;
+  }
+
+  function isSentenceTransVisible(key, kind) {
+    const id = `${key}:${kind}`;
+    if (id in state.sentenceRevealOverrides) {
+      return Boolean(state.sentenceRevealOverrides[id]);
     }
     return !state.prefs.globalHideTranslation;
   }
@@ -1335,6 +1418,25 @@
         </button>
       `;
 
+    const showSrcTrans = w.sentence ? isSentenceTransVisible(w.key, "src") : false;
+    const showIeltsTrans = ielts.speakable ? isSentenceTransVisible(w.key, "ielts") : false;
+
+    let srcTransText = "";
+    if (showSrcTrans && w.sentence) {
+      srcTransText = getSentenceTranslation(w.sentence);
+      if (srcTransText === null) {
+        fetchSentenceTranslation(w.sentence);
+      }
+    }
+
+    let ieltsTransText = "";
+    if (showIeltsTrans && ielts.speakable) {
+      ieltsTransText = getSentenceTranslation(ielts.speakable);
+      if (ieltsTransText === null) {
+        fetchSentenceTranslation(ielts.speakable);
+      }
+    }
+
     const contextHTML =
       w.sentence || w.tip
         ? `
@@ -1355,12 +1457,24 @@
               <div class="context-box context-box-source">
                 <div class="context-box-head">
                   <span class="context-label-source">原书语境例句</span>
-                  <button type="button" class="btn-speak-mini" data-action="speak-sentence" title="朗读整句跟读（再点一次可停止）">
-                    ${ICONS.speaker}
-                    <span>朗读原句</span>
-                  </button>
+                  <div class="context-head-actions">
+                    <button type="button" class="btn-speak-mini" data-action="toggle-src-trans" title="切换显示或隐藏原句中文翻译">
+                      <span>${showSrcTrans ? "隐藏句意" : "显示句意"}</span>
+                    </button>
+                    <button type="button" class="btn-speak-mini" data-action="speak-sentence" title="朗读整句跟读（再点一次可停止）">
+                      ${ICONS.speaker}
+                      <span>朗读原句</span>
+                    </button>
+                  </div>
                 </div>
                 <p class="context-text">${highlightTerm(w.sentence, w.word)}</p>
+                ${
+                  showSrcTrans
+                    ? `<p class="sentence-trans ${srcTransText ? "" : "sentence-trans-loading"}">${
+                        srcTransText ? escapeHTML(srcTransText) : "正在自动翻译原句…"
+                      }</p>`
+                    : ""
+                }
               </div>
             `
                 : ""
@@ -1374,15 +1488,27 @@
                   ${
                     ielts.speakable
                       ? `
-                    <button type="button" class="btn-speak-mini btn-speak-mini-indigo" data-action="speak-ielts" title="朗读雅思仿写例句（再点一次可停止）">
-                      ${ICONS.speaker}
-                      <span>朗读例句</span>
-                    </button>
+                    <div class="context-head-actions">
+                      <button type="button" class="btn-speak-mini btn-speak-mini-indigo" data-action="toggle-ielts-trans" title="切换显示或隐藏例句中文翻译">
+                        <span>${showIeltsTrans ? "隐藏句意" : "显示句意"}</span>
+                      </button>
+                      <button type="button" class="btn-speak-mini btn-speak-mini-indigo" data-action="speak-ielts" title="朗读雅思仿写例句（再点一次可停止）">
+                        ${ICONS.speaker}
+                        <span>朗读例句</span>
+                      </button>
+                    </div>
                   `
                       : ""
                   }
                 </div>
                 <p class="context-text">${highlightTerm(ielts.body, w.word)}</p>
+                ${
+                  ielts.speakable && showIeltsTrans
+                    ? `<p class="sentence-trans ${ieltsTransText ? "" : "sentence-trans-loading"}">${
+                        ieltsTransText ? escapeHTML(ieltsTransText) : "正在自动翻译例句…"
+                      }</p>`
+                    : ""
+                }
               </div>
             `
                 : ""
@@ -1595,6 +1721,14 @@
       state.itemRevealOverrides[key] = !isTranslationVisible(key);
       saveDailySession();
       renderCurrentView();
+    } else if (action === "toggle-src-trans") {
+      state.sentenceRevealOverrides[`${key}:src`] = !isSentenceTransVisible(key, "src");
+      saveDailySession();
+      renderCurrentView();
+    } else if (action === "toggle-ielts-trans") {
+      state.sentenceRevealOverrides[`${key}:ielts`] = !isSentenceTransVisible(key, "ielts");
+      saveDailySession();
+      renderCurrentView();
     } else if (action === "override-check") {
       const res = state.itemCheckResults[key];
       if (res && !res.isCorrect && !res.overridden) {
@@ -1711,6 +1845,7 @@
     els.btnGlobalTrans.addEventListener("click", () => {
       state.prefs.globalHideTranslation = !state.prefs.globalHideTranslation;
       state.itemRevealOverrides = {};
+      state.sentenceRevealOverrides = {};
       saveJSON(STORAGE_KEYS.PREFS, state.prefs);
       saveDailySession();
       updateToolbarControls();
