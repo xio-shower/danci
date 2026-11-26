@@ -44,13 +44,15 @@
       testedCount: 0,
       correctCount: 0,
     }),
-    prefs: loadJSON(STORAGE_KEYS.PREFS, {
+    prefs: {
       viewMode: "card", // 'card' | 'list'
       globalHideTranslation: true,
+      globalImitateMode: true,
       accent: "en-US", // 'en-US' | 'en-GB'
       rate: 1.0, // 1.0 | 0.7
       filter: "all",
-    }),
+      ...loadJSON(STORAGE_KEYS.PREFS, {}),
+    },
     searchQuery: "",
     orderMode: "default", // 'default' | 'shuffle' | 'weighted'
     shuffledOrder: null, // array of keys when orderMode is 'shuffle' or 'weighted'
@@ -63,6 +65,9 @@
     // Daily remembered UI states (persisted for today, auto-reset next day)
     itemRevealOverrides: {}, // { [key]: boolean }
     sentenceRevealOverrides: {}, // { [`${key}:src`|`${key}:ielts`]: boolean }
+    sentenceImitateOverrides: {}, // { [`${key}:src`|`${key}:ielts`]: boolean }
+    sentenceImitateInputs: {}, // { [`${key}:src`|`${key}:ielts`]: string }
+    sentenceImitateResults: {}, // { [`${key}:src`|`${key}:ielts`]: { usedTarget, similarityPct, userInput } }
     itemInputs: {}, // { [key]: string }
     itemCheckResults: {}, // { [key]: { isCorrect, userInput, overridden } }
     itemExpandedListContext: {}, // { [key]: boolean }
@@ -107,6 +112,8 @@
     btnGlobalTrans: document.getElementById("btn-global-trans"),
     iconGlobalEye: document.getElementById("icon-global-eye"),
     textGlobalTrans: document.getElementById("text-global-trans"),
+    btnGlobalImitate: document.getElementById("btn-global-imitate"),
+    textGlobalImitate: document.getElementById("text-global-imitate"),
     btnAccentUS: document.getElementById("btn-accent-us"),
     btnAccentUK: document.getElementById("btn-accent-uk"),
     btnRateNormal: document.getElementById("btn-rate-normal"),
@@ -1189,6 +1196,9 @@
       itemCheckResults: state.itemCheckResults,
       itemRevealOverrides: state.itemRevealOverrides,
       sentenceRevealOverrides: state.sentenceRevealOverrides,
+      sentenceImitateOverrides: state.sentenceImitateOverrides,
+      sentenceImitateInputs: state.sentenceImitateInputs,
+      sentenceImitateResults: state.sentenceImitateResults,
     });
   }
 
@@ -1222,6 +1232,18 @@
         saved.sentenceRevealOverrides && typeof saved.sentenceRevealOverrides === "object"
           ? saved.sentenceRevealOverrides
           : {};
+      state.sentenceImitateOverrides =
+        saved.sentenceImitateOverrides && typeof saved.sentenceImitateOverrides === "object"
+          ? saved.sentenceImitateOverrides
+          : {};
+      state.sentenceImitateInputs =
+        saved.sentenceImitateInputs && typeof saved.sentenceImitateInputs === "object"
+          ? saved.sentenceImitateInputs
+          : {};
+      state.sentenceImitateResults =
+        saved.sentenceImitateResults && typeof saved.sentenceImitateResults === "object"
+          ? saved.sentenceImitateResults
+          : {};
       restorePositionFromKey();
       return false;
     }
@@ -1236,6 +1258,9 @@
     state.itemCheckResults = {};
     state.itemRevealOverrides = {};
     state.sentenceRevealOverrides = {};
+    state.sentenceImitateOverrides = {};
+    state.sentenceImitateInputs = {};
+    state.sentenceImitateResults = {};
     state.orderMode = prevMode;
 
     if (prevMode === "weighted" && state.words.length > 0) {
@@ -1287,6 +1312,54 @@
       return Boolean(state.sentenceRevealOverrides[id]);
     }
     return !state.prefs.globalHideTranslation;
+  }
+
+  function isSentenceImitateMode(key, kind) {
+    const id = `${key}:${kind}`;
+    if (id in state.sentenceImitateOverrides) {
+      return Boolean(state.sentenceImitateOverrides[id]);
+    }
+    return Boolean(state.prefs.globalImitateMode);
+  }
+
+  function checkEnglishImitation(userEn, refEn, targetTerm) {
+    const uNorm = normalizeEn(userEn);
+    const rNorm = normalizeEn(refEn);
+
+    // Check if target word/phrase (including wildcard patterns like "put [sth] right to work") is used
+    let usedTarget = false;
+    const cleanedTerm = String(targetTerm || "")
+      .replace(/\[[^\]]+\]/g, "___WILD___")
+      .trim();
+    const parts = cleanedTerm
+      .split("___WILD___")
+      .map((p) => normalizeEn(p))
+      .filter(Boolean);
+    if (parts.length === 1) {
+      usedTarget = uNorm.includes(parts[0]);
+    } else if (parts.length > 1) {
+      const re = new RegExp(parts.map((p) => escapeRegex(p)).join("\\s+(?:\\S+\\s+){0,5}?"), "i");
+      usedTarget = re.test(uNorm);
+    }
+
+    // Word-level overlap against reference sentence
+    const uTokens = uNorm.split(" ").filter(Boolean);
+    const rTokens = rNorm.split(" ").filter(Boolean);
+    let similarityPct = 0;
+    if (uTokens.length > 0 && rTokens.length > 0) {
+      const rSet = new Set(rTokens);
+      const uSet = new Set(uTokens);
+      let hits = 0;
+      for (const tok of uSet) {
+        if (rSet.has(tok)) hits++;
+      }
+      const precision = hits / uSet.size;
+      const recall = hits / rSet.size;
+      const f1 = precision + recall > 0 ? (2 * precision * recall) / (precision + recall) : 0;
+      similarityPct = Math.round(f1 * 100);
+    }
+
+    return { usedTarget, similarityPct, userInput: userEn.trim() };
   }
 
   // --- Filtering & Ordering ---
@@ -1418,8 +1491,10 @@
         </button>
       `;
 
-    const showSrcTrans = w.sentence ? isSentenceTransVisible(w.key, "src") : false;
-    const showIeltsTrans = ielts.speakable ? isSentenceTransVisible(w.key, "ielts") : false;
+    const imitateSrc = w.sentence ? isSentenceImitateMode(w.key, "src") : false;
+    const imitateIelts = ielts.speakable ? isSentenceImitateMode(w.key, "ielts") : false;
+    const showSrcTrans = w.sentence ? imitateSrc || isSentenceTransVisible(w.key, "src") : false;
+    const showIeltsTrans = ielts.speakable ? imitateIelts || isSentenceTransVisible(w.key, "ielts") : false;
 
     let srcTransText = "";
     if (showSrcTrans && w.sentence) {
@@ -1436,6 +1511,49 @@
         fetchSentenceTranslation(ielts.speakable);
       }
     }
+
+    const buildImitateBody = (kind, zhText, refEn, loadingLabel) => {
+      const id = `${w.key}:${kind}`;
+      const draft = state.sentenceImitateInputs[id] || "";
+      const res = state.sentenceImitateResults[id];
+      const feedbackBlock = res
+        ? `
+          <div class="imitate-feedback ${res.usedTarget ? "good" : "warn"}">
+            <div class="imitate-meta">
+              <span>${
+                res.usedTarget
+                  ? `✓ 已用上目标搭配「${escapeHTML(w.word)}」`
+                  : `提醒：暂未检测到目标搭配「${escapeHTML(w.word)}」`
+              }</span>
+              <span>与参考句词面匹配度：${res.similarityPct}%</span>
+            </div>
+            <p class="imitate-ref-en"><strong>参考英文：</strong>${highlightTerm(refEn, w.word)}</p>
+          </div>
+        `
+        : "";
+
+      return `
+        <p class="imitate-prompt-zh ${zhText ? "" : "sentence-trans-loading"}">${
+          zhText ? escapeHTML(zhText) : loadingLabel
+        }</p>
+        <form class="imitate-form" data-action="imitate-form" data-imitate-kind="${kind}">
+          <textarea
+            class="imitate-textarea"
+            name="imitation"
+            data-imitate-kind="${kind}"
+            placeholder="请根据上面的中文意思，尝试用「${escapeHTML(w.word)}」仿写英文句子…"
+          >${escapeHTML(draft)}</textarea>
+          <div class="imitate-actions">
+            <span class="imitate-tip-hint">Ctrl+Enter 快速核对</span>
+            <div class="imitate-btns">
+              <button type="button" class="btn-secondary btn-sm" data-action="toggle-${kind}-imitate">显示英文</button>
+              <button type="submit" class="btn-primary btn-sm">核对仿写</button>
+            </div>
+          </div>
+        </form>
+        ${feedbackBlock}
+      `;
+    };
 
     const contextHTML =
       w.sentence || w.tip
@@ -1458,22 +1576,35 @@
                 <div class="context-box-head">
                   <span class="context-label-source">原书语境例句</span>
                   <div class="context-head-actions">
-                    <button type="button" class="btn-speak-mini" data-action="toggle-src-trans" title="切换显示或隐藏原句中文翻译">
-                      <span>${showSrcTrans ? "隐藏句意" : "显示句意"}</span>
+                    <button type="button" class="btn-speak-mini ${imitateSrc ? "is-on" : ""}" data-action="toggle-src-imitate" title="隐藏英文，看中文仿写英文句子">
+                      <span>${imitateSrc ? "显示英文" : "仿写英文"}</span>
                     </button>
+                    ${
+                      !imitateSrc
+                        ? `<button type="button" class="btn-speak-mini" data-action="toggle-src-trans" title="切换显示或隐藏原句中文翻译">
+                            <span>${showSrcTrans ? "隐藏句意" : "显示句意"}</span>
+                          </button>`
+                        : ""
+                    }
                     <button type="button" class="btn-speak-mini" data-action="speak-sentence" title="朗读整句跟读（再点一次可停止）">
                       ${ICONS.speaker}
                       <span>朗读原句</span>
                     </button>
                   </div>
                 </div>
-                <p class="context-text">${highlightTerm(w.sentence, w.word)}</p>
                 ${
-                  showSrcTrans
-                    ? `<p class="sentence-trans ${srcTransText ? "" : "sentence-trans-loading"}">${
-                        srcTransText ? escapeHTML(srcTransText) : "正在自动翻译原句…"
-                      }</p>`
-                    : ""
+                  imitateSrc
+                    ? buildImitateBody("src", srcTransText, w.sentence, "正在自动翻译原句…")
+                    : `
+                      <p class="context-text">${highlightTerm(w.sentence, w.word)}</p>
+                      ${
+                        showSrcTrans
+                          ? `<p class="sentence-trans ${srcTransText ? "" : "sentence-trans-loading"}">${
+                              srcTransText ? escapeHTML(srcTransText) : "正在自动翻译原句…"
+                            }</p>`
+                          : ""
+                      }
+                    `
                 }
               </div>
             `
@@ -1489,9 +1620,16 @@
                     ielts.speakable
                       ? `
                     <div class="context-head-actions">
-                      <button type="button" class="btn-speak-mini btn-speak-mini-indigo" data-action="toggle-ielts-trans" title="切换显示或隐藏例句中文翻译">
-                        <span>${showIeltsTrans ? "隐藏句意" : "显示句意"}</span>
+                      <button type="button" class="btn-speak-mini btn-speak-mini-indigo ${imitateIelts ? "is-on" : ""}" data-action="toggle-ielts-imitate" title="隐藏英文，看中文仿写雅思例句">
+                        <span>${imitateIelts ? "显示英文" : "仿写英文"}</span>
                       </button>
+                      ${
+                        !imitateIelts
+                          ? `<button type="button" class="btn-speak-mini btn-speak-mini-indigo" data-action="toggle-ielts-trans" title="切换显示或隐藏例句中文翻译">
+                              <span>${showIeltsTrans ? "隐藏句意" : "显示句意"}</span>
+                            </button>`
+                          : ""
+                      }
                       <button type="button" class="btn-speak-mini btn-speak-mini-indigo" data-action="speak-ielts" title="朗读雅思仿写例句（再点一次可停止）">
                         ${ICONS.speaker}
                         <span>朗读例句</span>
@@ -1501,13 +1639,19 @@
                       : ""
                   }
                 </div>
-                <p class="context-text">${highlightTerm(ielts.body, w.word)}</p>
                 ${
-                  ielts.speakable && showIeltsTrans
-                    ? `<p class="sentence-trans ${ieltsTransText ? "" : "sentence-trans-loading"}">${
-                        ieltsTransText ? escapeHTML(ieltsTransText) : "正在自动翻译例句…"
-                      }</p>`
-                    : ""
+                  ielts.speakable && imitateIelts
+                    ? buildImitateBody("ielts", ieltsTransText, ielts.speakable, "正在自动翻译例句…")
+                    : `
+                      <p class="context-text">${highlightTerm(ielts.body, w.word)}</p>
+                      ${
+                        ielts.speakable && showIeltsTrans
+                          ? `<p class="sentence-trans ${ieltsTransText ? "" : "sentence-trans-loading"}">${
+                              ieltsTransText ? escapeHTML(ieltsTransText) : "正在自动翻译例句…"
+                            }</p>`
+                          : ""
+                      }
+                    `
                 }
               </div>
             `
@@ -1674,6 +1818,11 @@
       ? "翻译已隐藏 (点击显示全部)"
       : "翻译已显示 (点击全部隐藏)";
 
+    // Global imitate mode toggle
+    const imitateOn = Boolean(state.prefs.globalImitateMode);
+    els.btnGlobalImitate.classList.toggle("is-on", imitateOn);
+    els.textGlobalImitate.textContent = imitateOn ? "例句仿写: 开" : "例句仿写: 关";
+
     // Accent & rate
     els.btnAccentUS.classList.toggle("active", state.prefs.accent === "en-US");
     els.btnAccentUK.classList.toggle("active", state.prefs.accent === "en-GB");
@@ -1729,6 +1878,14 @@
       state.sentenceRevealOverrides[`${key}:ielts`] = !isSentenceTransVisible(key, "ielts");
       saveDailySession();
       renderCurrentView();
+    } else if (action === "toggle-src-imitate") {
+      state.sentenceImitateOverrides[`${key}:src`] = !isSentenceImitateMode(key, "src");
+      saveDailySession();
+      renderCurrentView();
+    } else if (action === "toggle-ielts-imitate") {
+      state.sentenceImitateOverrides[`${key}:ielts`] = !isSentenceImitateMode(key, "ielts");
+      saveDailySession();
+      renderCurrentView();
     } else if (action === "override-check") {
       const res = state.itemCheckResults[key];
       if (res && !res.isCorrect && !res.overridden) {
@@ -1757,14 +1914,48 @@
   }
 
   function handleCardInput(e) {
-    if (!e.target.classList.contains("test-input")) return;
     const card = e.target.closest(".vocab-card");
     if (!card) return;
-    state.itemInputs[card.dataset.key] = e.target.value;
-    saveDailySession();
+    if (e.target.classList.contains("test-input")) {
+      state.itemInputs[card.dataset.key] = e.target.value;
+      saveDailySession();
+    } else if (e.target.classList.contains("imitate-textarea")) {
+      const kind = e.target.dataset.imitateKind;
+      if (kind) {
+        state.sentenceImitateInputs[`${card.dataset.key}:${kind}`] = e.target.value;
+        saveDailySession();
+      }
+    }
   }
 
   function handleCardSubmit(e) {
+    const imitateForm = e.target.closest('[data-action="imitate-form"]');
+    if (imitateForm) {
+      e.preventDefault();
+      const card = imitateForm.closest(".vocab-card");
+      if (!card) return;
+      const key = card.dataset.key;
+      const kind = imitateForm.dataset.imitateKind;
+      const w = state.words.find((item) => item.key === key);
+      if (!w || !kind) return;
+
+      const textarea = imitateForm.querySelector('textarea[name="imitation"]');
+      const userEn = (textarea ? textarea.value : "").trim();
+      if (!userEn) {
+        showToast("请先根据中文意思输入你的英文仿写");
+        if (textarea) textarea.focus();
+        return;
+      }
+
+      const id = `${key}:${kind}`;
+      const refEn = kind === "src" ? w.sentence : parseIeltsTip(w.tip).speakable;
+      state.sentenceImitateInputs[id] = userEn;
+      state.sentenceImitateResults[id] = checkEnglishImitation(userEn, refEn, w.word);
+      saveDailySession();
+      renderCurrentView();
+      return;
+    }
+
     const form = e.target.closest('[data-action="check-form"]');
     if (!form) return;
     e.preventDefault();
@@ -1850,6 +2041,21 @@
       saveDailySession();
       updateToolbarControls();
       renderCurrentView();
+    });
+
+    // Global imitate mode toggle
+    els.btnGlobalImitate.addEventListener("click", () => {
+      state.prefs.globalImitateMode = !state.prefs.globalImitateMode;
+      state.sentenceImitateOverrides = {};
+      saveJSON(STORAGE_KEYS.PREFS, state.prefs);
+      saveDailySession();
+      updateToolbarControls();
+      renderCurrentView();
+      showToast(
+        state.prefs.globalImitateMode
+          ? "已开启例句仿写模式（隐藏英文，仅留中文与仿写框）"
+          : "已关闭例句仿写模式（恢复显示英文例句）"
+      );
     });
 
     // Accent
@@ -1961,6 +2167,17 @@
       container.addEventListener("click", handleCardClick);
       container.addEventListener("input", handleCardInput);
       container.addEventListener("submit", handleCardSubmit);
+      container.addEventListener("keydown", (e) => {
+        if (
+          e.target.classList.contains("imitate-textarea") &&
+          e.key === "Enter" &&
+          (e.ctrlKey || e.metaKey)
+        ) {
+          e.preventDefault();
+          const form = e.target.closest('form[data-action="imitate-form"]');
+          if (form) form.requestSubmit();
+        }
+      });
     });
 
     // Keyboard shortcuts in Card Mode
@@ -2004,6 +2221,10 @@
       state.itemCheckResults = {};
       state.itemInputs = {};
       state.itemRevealOverrides = {};
+      state.sentenceRevealOverrides = {};
+      state.sentenceImitateOverrides = {};
+      state.sentenceImitateInputs = {};
+      state.sentenceImitateResults = {};
       state.currentIndex = 0;
       state.currentKey = null;
       saveProgress();
