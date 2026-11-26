@@ -1204,6 +1204,90 @@ kbd {
   color: var(--ink-secondary);
 }
 
+.imitate-analysis {
+  margin-top: 8px;
+  padding: 10px 12px;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.85);
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  color: var(--ink-secondary);
+  font-size: 0.78rem;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.imitate-analysis-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-weight: 700;
+  color: var(--ink);
+  font-size: 0.76rem;
+}
+
+.imitate-diff-line {
+  line-height: 1.75;
+  word-break: break-word;
+}
+
+.diff-hit {
+  color: var(--emerald-700);
+  font-weight: 500;
+}
+
+.diff-alt {
+  color: var(--amber-800);
+  background: rgba(254, 243, 199, 0.85);
+  padding: 0 4px;
+  border-radius: 4px;
+  text-decoration: underline dotted rgba(146, 64, 14, 0.45);
+}
+
+.miss-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+}
+
+.miss-chip {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 6px;
+  background: var(--rose-50);
+  border: 1px solid var(--rose-200);
+  color: var(--rose-700);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  font-weight: 500;
+}
+
+.analysis-list {
+  margin: 0;
+  padding-left: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  color: var(--ink-secondary);
+}
+
+.analysis-list li {
+  line-height: 1.55;
+}
+
+.analysis-ai-box {
+  margin-top: 4px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--indigo-50);
+  border: 1px solid var(--indigo-100);
+  color: var(--ink-secondary);
+  white-space: pre-wrap;
+  line-height: 1.6;
+}
+
 mark.term-mark {
   background: rgba(253, 230, 138, 0.85);
   color: var(--ink);

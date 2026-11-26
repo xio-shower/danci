@@ -1322,12 +1322,65 @@
     return Boolean(state.prefs.globalImitateMode);
   }
 
-  function checkEnglishImitation(userEn, refEn, targetTerm) {
-    const uNorm = normalizeEn(userEn);
-    const rNorm = normalizeEn(refEn);
+  const EN_STOPWORDS = new Set([
+    "a", "an", "the", "and", "or", "but", "of", "to", "in", "on", "at", "for", "with", "by", "from",
+    "as", "is", "are", "was", "were", "be", "been", "being", "it", "its", "this", "that", "these",
+    "those", "i", "my", "me", "we", "our", "you", "your", "they", "their", "he", "his", "she", "her",
+    "can", "may", "might", "will", "would", "could", "do", "does", "did", "not", "so", "than", "into",
+  ]);
 
-    // Check if target word/phrase (including wildcard patterns like "put [sth] right to work") is used
+  function tokenizeDisplayWords(str) {
+    return String(str || "")
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean);
+  }
+
+  function cleanWordToken(tok) {
+    return String(tok || "")
+      .toLowerCase()
+      .replace(/^[^a-z0-9]+|[^a-z0-9]+$/g, "");
+  }
+
+  function computeLcsMatchedUserIndices(uClean, rClean) {
+    const m = uClean.length;
+    const n = rClean.length;
+    const dp = Array.from({ length: m + 1 }, () => new Uint16Array(n + 1));
+    for (let i = 1; i <= m; i++) {
+      for (let j = 1; j <= n; j++) {
+        if (uClean[i - 1] && uClean[i - 1] === rClean[j - 1]) {
+          dp[i][j] = dp[i - 1][j - 1] + 1;
+        } else {
+          dp[i][j] = dp[i - 1][j] >= dp[i][j - 1] ? dp[i - 1][j] : dp[i][j - 1];
+        }
+      }
+    }
+    const matchedUserIdx = new Set();
+    let i = m;
+    let j = n;
+    while (i > 0 && j > 0) {
+      if (uClean[i - 1] && uClean[i - 1] === rClean[j - 1]) {
+        matchedUserIdx.add(i - 1);
+        i--;
+        j--;
+      } else if (dp[i - 1][j] >= dp[i][j - 1]) {
+        i--;
+      } else {
+        j--;
+      }
+    }
+    return matchedUserIdx;
+  }
+
+  function checkEnglishImitation(userEn, refEn, targetTerm, extraTip = "") {
+    const rawUser = String(userEn || "").trim();
+    const rawRef = String(refEn || "").trim();
+    const uNorm = normalizeEn(rawUser);
+    const rNorm = normalizeEn(rawRef);
+
+    // 1. Target phrase / collocation check (exact & partial)
     let usedTarget = false;
+    let partialTarget = false;
     const cleanedTerm = String(targetTerm || "")
       .replace(/\[[^\]]+\]/g, "___WILD___")
       .trim();
@@ -1337,18 +1390,34 @@
       .filter(Boolean);
     if (parts.length === 1) {
       usedTarget = uNorm.includes(parts[0]);
+      if (!usedTarget) {
+        const termWords = parts[0].split(" ").filter((t) => t.length >= 3);
+        partialTarget = termWords.some((tw) => uNorm.includes(tw.slice(0, Math.max(3, tw.length - 1))));
+      }
     } else if (parts.length > 1) {
       const re = new RegExp(parts.map((p) => escapeRegex(p)).join("\\s+(?:\\S+\\s+){0,5}?"), "i");
       usedTarget = re.test(uNorm);
+      if (!usedTarget) {
+        partialTarget = parts.some((p) => uNorm.includes(p));
+      }
     }
 
-    // Word-level overlap against reference sentence
-    const uTokens = uNorm.split(" ").filter(Boolean);
-    const rTokens = rNorm.split(" ").filter(Boolean);
+    // 2. Word-level LCS diff & similarity
+    const uDisplay = tokenizeDisplayWords(rawUser);
+    const rDisplay = tokenizeDisplayWords(rawRef);
+    const uClean = uDisplay.map(cleanWordToken);
+    const rClean = rDisplay.map(cleanWordToken);
+
+    const matchedIdx = computeLcsMatchedUserIndices(uClean, rClean);
+    const userAnnotated = uDisplay.map((word, idx) => ({
+      word,
+      matched: matchedIdx.has(idx) || !uClean[idx],
+    }));
+
+    const uSet = new Set(uClean.filter(Boolean));
+    const rSet = new Set(rClean.filter(Boolean));
     let similarityPct = 0;
-    if (uTokens.length > 0 && rTokens.length > 0) {
-      const rSet = new Set(rTokens);
-      const uSet = new Set(uTokens);
+    if (uSet.size > 0 && rSet.size > 0) {
       let hits = 0;
       for (const tok of uSet) {
         if (rSet.has(tok)) hits++;
@@ -1359,7 +1428,173 @@
       similarityPct = Math.round(f1 * 100);
     }
 
-    return { usedTarget, similarityPct, userInput: userEn.trim() };
+    // 3. High-value reference keywords missing from user's imitation
+    const missingKeywords = [];
+    const seenMiss = new Set();
+    for (let k = 0; k < rClean.length; k++) {
+      const tok = rClean[k];
+      if (!tok || tok.length < 3 || EN_STOPWORDS.has(tok) || uSet.has(tok) || seenMiss.has(tok)) continue;
+      seenMiss.add(tok);
+      missingKeywords.push(rDisplay[k].replace(/^[^A-Za-z0-9]+|[^A-Za-z0-9]+$/g, ""));
+    }
+
+    // 4. Structured grammar, pattern & collocation tips
+    const tips = [];
+
+    if (usedTarget) {
+      tips.push(`核心搭配：已准确嵌入目标表达「${targetTerm}」，位置与形式完整。`);
+    } else if (partialTarget) {
+      tips.push(`核心搭配：写出了部分词干，但注意完整地道搭配应为「${targetTerm}」（留意单复数、介词或固定语序）。`);
+    } else {
+      tips.push(`核心搭配：句中尚未出现目标表达「${targetTerm}」，建议改写并刻意套用该搭配。`);
+    }
+
+    // Detect key rhetorical / grammatical patterns in reference sentence
+    const patternChecks = [
+      {
+        re: /\bwhile\b/i,
+        uRe: /\b(while|whereas|although|though)\b/i,
+        msg: "句型结构：参考句用「While ..., ...」引导让步/对比从句，这是雅思写作提升句式多样性的高频高分结构。",
+      },
+      {
+        re: /\balthough\b|\bdespite\b/i,
+        uRe: /\b(although|though|despite|in spite of)\b/i,
+        msg: "句型结构：参考句使用了让步状语结构（Although + 从句 / Despite + 名词短语），注意两者后接成分的区别。",
+      },
+      {
+        re: /\bin an effort to\b/i,
+        uRe: /\bin an effort to\b/i,
+        msg: "句型结构：参考句以「In an effort to + 动词原形」作目的状语，比普通 to / in order to 更书面地道。",
+      },
+      {
+        re: /\bbe it\b/i,
+        uRe: /\bbe it\b/i,
+        msg: "句型结构：参考句使用了倒装让步结构「Be it A, B, or C（无论是……）」，非常适合雅思大作文开头或论证段。",
+      },
+      {
+        re: /\bnot only\b[\s\S]+\bbut also\b/i,
+        uRe: /\bnot only\b/i,
+        msg: "句型结构：参考句使用了「not only ... but also ...」递进并列结构来强调双重因素。",
+      },
+      {
+        re: /\btherefore\b/i,
+        uRe: /\b(therefore|thus|consequently|hence)\b/i,
+        msg: "逻辑衔接：参考句用「therefore」明确引出因果结论（注意连接两个完整分句时前面需用分号或句号）。",
+      },
+      {
+        re: /\b(has|have)\s+(become|witnessed|worked|been)\b/i,
+        uRe: /\b(has|have)\s+[a-z]+/i,
+        msg: "时态提示：参考句使用了现在完成时（has/have + 过去分词），用来描述从过去持续至今的趋势或已发生的变化。",
+      },
+      {
+        re: /\b(should|must)\b/i,
+        uRe: /\b(should|must|ought to|need to)\b/i,
+        msg: "语气与情态：参考句用情态动词 should / must 提出明确建议或责任主张，贴合雅思议论文语域。",
+      },
+    ];
+
+    for (const chk of patternChecks) {
+      if (chk.re.test(rawRef) && !chk.uRe.test(rawUser)) {
+        tips.push(chk.msg);
+        if (tips.length >= 3) break;
+      }
+    }
+
+    // Basic writing mechanics
+    const mechIssues = [];
+    if (rawUser && /^[a-z]/.test(rawUser)) {
+      mechIssues.push("句首字母建议大写");
+    }
+    if (rawUser && !/[.!?]$/.test(rawUser)) {
+      mechIssues.push(rawRef.endsWith("?") ? "这是疑问句，句末记得加问号 ?" : "句末建议加上标点句号 .");
+    }
+    if (uDisplay.length > 0 && rDisplay.length > 0 && uDisplay.length < Math.ceil(rDisplay.length * 0.55)) {
+      mechIssues.push(`当前句长偏短（你写了 ${uDisplay.length} 词，参考句 ${rDisplay.length} 词），可能漏译了修饰成分`);
+    }
+    if (mechIssues.length > 0) {
+      tips.push(`书写细节：${mechIssues.join("；")}。`);
+    }
+
+    // Extract any usage note from IELTS tip column (e.g. (注：...))
+    const noteMatch = String(extraTip || "").match(/[（(](注[：:][^）)]+)[）)]/);
+    if (noteMatch) {
+      tips.push(`语域提醒：${noteMatch[1]}。`);
+    }
+
+    if (similarityPct >= 80 && usedTarget) {
+      tips.push("整体评价：表达非常贴近地道参考句，用词精准、句式完整！");
+    } else if (usedTarget && similarityPct >= 45) {
+      tips.push("整体评价：核心搭配已掌握！英文表达可以有多种同义改写，重点对照上方漏词与参考句的动词/介词搭配即可。");
+    }
+
+    return {
+      usedTarget,
+      partialTarget,
+      similarityPct,
+      userInput: rawUser,
+      userAnnotated,
+      missingKeywords: missingKeywords.slice(0, 8),
+      tips,
+      aiCritique: "",
+      aiLoading: false,
+    };
+  }
+
+  async function requestAiImitationCritique(id, userEn, refEn, zhText, targetTerm) {
+    const resObj = state.sentenceImitateResults[id];
+    if (!resObj || resObj.aiLoading) return;
+
+    const cfg = state.ttsConfig || {};
+    const apiKey = (cfg.openaiApiKey || "").trim();
+    const baseUrl = (cfg.openaiBaseUrl || "https://api.openai.com/v1").trim().replace(/\/+$/, "");
+    if (!apiKey) {
+      showToast("如需 AI 深度批改，请先在右上角设置中填写 OpenAI API Key");
+      return;
+    }
+
+    resObj.aiLoading = true;
+    renderCurrentView();
+
+    try {
+      const resp = await fetch(`${baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model: "gpt-4o-mini",
+          temperature: 0.3,
+          messages: [
+            {
+              role: "system",
+              content:
+                "你是一位严谨简练的雅思写作与口语导师。请用中文在 4 行以内点评学生的英文仿写：1) 指出语法或搭配错误（若无则肯定）；2) 给出 1 个更地道的修改建议或升级表达；3) 给出简短鼓励。",
+            },
+            {
+              role: "user",
+              content: `目标词汇/搭配：${targetTerm}\n中文句意：${zhText}\n参考英文：${refEn}\n我的仿写：${userEn}`,
+            },
+          ],
+        }),
+      });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const data = await resp.json();
+      const content =
+        data &&
+        data.choices &&
+        data.choices[0] &&
+        data.choices[0].message &&
+        data.choices[0].message.content;
+      resObj.aiCritique = content ? content.trim() : "未获取到批改内容";
+    } catch (err) {
+      console.error("AI critique failed:", err);
+      showToast(`AI 批改请求失败：${err.message}`);
+    } finally {
+      resObj.aiLoading = false;
+      saveDailySession();
+      renderCurrentView();
+    }
   }
 
   // --- Filtering & Ordering ---
@@ -1516,8 +1751,49 @@
       const id = `${w.key}:${kind}`;
       const draft = state.sentenceImitateInputs[id] || "";
       const res = state.sentenceImitateResults[id];
-      const feedbackBlock = res
-        ? `
+
+      let feedbackBlock = "";
+      if (res) {
+        const diffHTML =
+          Array.isArray(res.userAnnotated) && res.userAnnotated.length > 0
+            ? res.userAnnotated
+                .map((item) =>
+                  item.matched
+                    ? `<span class="diff-hit">${escapeHTML(item.word)}</span>`
+                    : `<span class="diff-alt" title="与参考句用词不同（可能是同义替换或拼写/语法差异）">${escapeHTML(
+                        item.word
+                      )}</span>`
+                )
+                .join(" ")
+            : escapeHTML(res.userInput || "");
+
+        const missHTML =
+          Array.isArray(res.missingKeywords) && res.missingKeywords.length > 0
+            ? `
+              <div class="miss-chips">
+                <span><strong>参考句高分实词：</strong></span>
+                ${res.missingKeywords.map((kw) => `<span class="miss-chip">${escapeHTML(kw)}</span>`).join("")}
+              </div>
+            `
+            : "";
+
+        const tipsHTML =
+          Array.isArray(res.tips) && res.tips.length > 0
+            ? `<ul class="analysis-list">${res.tips.map((t) => `<li>${escapeHTML(t)}</li>`).join("")}</ul>`
+            : "";
+
+        const hasOpenaiKey = Boolean(state.ttsConfig && (state.ttsConfig.openaiApiKey || "").trim());
+        const aiBtnHTML = hasOpenaiKey
+          ? `<button type="button" class="btn-speak-mini btn-speak-mini-indigo" data-action="ai-critique" data-imitate-kind="${kind}" ${
+              res.aiLoading ? "disabled" : ""
+            }>${res.aiLoading ? "AI 批改中…" : res.aiCritique ? "重新 AI 批改" : "AI 深度批改"}</button>`
+          : "";
+
+        const aiBoxHTML = res.aiCritique
+          ? `<div class="analysis-ai-box"><strong>AI 导师点评：</strong>\n${escapeHTML(res.aiCritique)}</div>`
+          : "";
+
+        feedbackBlock = `
           <div class="imitate-feedback ${res.usedTarget ? "good" : "warn"}">
             <div class="imitate-meta">
               <span>${
@@ -1525,12 +1801,22 @@
                   ? `✓ 已用上目标搭配「${escapeHTML(w.word)}」`
                   : `提醒：暂未检测到目标搭配「${escapeHTML(w.word)}」`
               }</span>
-              <span>与参考句词面匹配度：${res.similarityPct}%</span>
+              <span>参考句词面匹配度：${res.similarityPct}%</span>
             </div>
             <p class="imitate-ref-en"><strong>参考英文：</strong>${highlightTerm(refEn, w.word)}</p>
+            <div class="imitate-analysis">
+              <div class="imitate-analysis-title">
+                <span>仿写解析（绿色为命中参考词，黄底为不同表达/待核查）</span>
+                ${aiBtnHTML}
+              </div>
+              <div class="imitate-diff-line"><strong>你的句子：</strong>${diffHTML}</div>
+              ${missHTML}
+              ${tipsHTML}
+              ${aiBoxHTML}
+            </div>
           </div>
-        `
-        : "";
+        `;
+      }
 
       return `
         <p class="imitate-prompt-zh ${zhText ? "" : "sentence-trans-loading"}">${
@@ -1886,6 +2172,17 @@
       state.sentenceImitateOverrides[`${key}:ielts`] = !isSentenceImitateMode(key, "ielts");
       saveDailySession();
       renderCurrentView();
+    } else if (action === "ai-critique") {
+      const kind = actionEl.dataset.imitateKind;
+      if (kind) {
+        const id = `${key}:${kind}`;
+        const res = state.sentenceImitateResults[id];
+        const refEn = kind === "src" ? w.sentence : parseIeltsTip(w.tip).speakable;
+        const zhText = getSentenceTranslation(refEn) || "";
+        if (res && res.userInput) {
+          requestAiImitationCritique(id, res.userInput, refEn, zhText, w.word);
+        }
+      }
     } else if (action === "override-check") {
       const res = state.itemCheckResults[key];
       if (res && !res.isCorrect && !res.overridden) {
@@ -1949,8 +2246,9 @@
 
       const id = `${key}:${kind}`;
       const refEn = kind === "src" ? w.sentence : parseIeltsTip(w.tip).speakable;
+      const extraTip = kind === "ielts" ? w.tip : "";
       state.sentenceImitateInputs[id] = userEn;
-      state.sentenceImitateResults[id] = checkEnglishImitation(userEn, refEn, w.word);
+      state.sentenceImitateResults[id] = checkEnglishImitation(userEn, refEn, w.word, extraTip);
       saveDailySession();
       renderCurrentView();
       return;
